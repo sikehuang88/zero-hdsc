@@ -1,0 +1,86 @@
+# SSA default configuration.
+# Environment-specific overrides live in config/development.toml etc.
+# Secrets NEVER go here — they live in environment variables only.
+
+[app]
+name = "ssa"
+timezone = "UTC"
+
+[llm]
+model = "deepseek/deepseek-chat"
+temperature = 0.8
+max_tokens = 1024
+timeout_seconds = 30
+retry_count = 2
+
+[embedding]
+model = "BAAI/bge-small-zh-v1.5"
+dim = 512
+cache_dir = "models"
+batch_size = 32
+
+[retrieval]
+candidates = 50
+final_k = 8
+semantic_weight = 0.35
+recency_weight = 0.15
+importance_weight = 0.15
+relationship_weight = 0.15
+unresolved_weight = 0.10
+source_trust_weight = 0.10
+dedup_similarity_threshold = 0.92
+radiation_decay = 0.5
+
+[initiative]
+daily_limit = 3
+cooldown_minutes = 240
+quiet_hours_start = "23:00"
+quiet_hours_end = "07:00"
+min_urgency = 0.70
+min_gap_hours = 4
+
+[budget]
+background_daily_llm_budget = 20
+sync_llm_per_turn = 3
+goal_sync_llm_per_turn = 2
+
+[database]
+path = "data/ssa.db"
+busy_timeout_ms = 5000
+
+[state]
+valence_decay = 0.75
+valence_signal_weight = 0.25
+arousal_signal_weight = 0.30
+arousal_decay_per_hour = 0.10
+refresh_delta_threshold = 0.02
+
+[relationship]
+normal_delta_cap = 0.03
+major_delta_cap = 0.10
+
+[goal]
+max_active_self = 3
+max_active_shared = 3
+min_project_days = 7
+urgency_priority_weight = 0.35
+urgency_due_weight = 0.20
+urgency_need_weight = 0.20
+urgency_opportunity_weight = 0.15
+urgency_continuity_weight = 0.10
+
+[identity]
+candidate_confidence_cap = 0.6
+active_confidence_threshold = 0.7
+active_min_age_days = 7
+
+[ablation]
+# Baseline switches: B0..B5. See pipeline §2.6.
+baseline = "B4"
+enable_memory = true
+enable_appraisal = true
+enable_state = true
+enable_relationship = true
+enable_identity = true
+enable_goals = true
+enable_lifecycle = true

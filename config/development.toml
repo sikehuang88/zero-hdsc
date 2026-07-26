@@ -1,0 +1,10 @@
+# Development overrides. Do not put secrets here.
+
+[app]
+timezone = "Asia/Shanghai"
+
+[database]
+path = "data/ssa.dev.db"
+
+[budget]
+background_daily_llm_budget = 50
