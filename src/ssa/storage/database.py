@@ -54,6 +54,25 @@ class Database:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _load_vec_extension(self, conn: sqlite3.Connection) -> None:
+        """Try to load the sqlite-vec extension (pipeline §8.1 step 7).
+
+        If the extension is available, sets `_vec_available = True` so that
+        the migration runner creates the `memory_vec` virtual table.
+        If not available, `_vec_available` remains False and the vec table
+        creation is skipped gracefully.
+        """
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            self._vec_available = True
+        except Exception:
+            # Extension not available — retrieval will be limited.
+            self._vec_available = False
+
     def initialize(self) -> None:
         """Open the connection and run pending migrations.
 
@@ -74,6 +93,9 @@ class Database:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={self._config.busy_timeout_ms}")
+
+        # §8.1 step 7: load sqlite-vec extension (before migrations).
+        self._load_vec_extension(conn)
 
         # §8.1 steps 5-6: run migrations
         self._run_migrations(conn)
