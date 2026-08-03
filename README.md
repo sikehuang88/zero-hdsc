@@ -3,6 +3,16 @@
 > Hyperdimensional Space Computing — a single-user, text-first digital-life
 > research runtime with a local, inspectable high-dimensional trace substrate.
 
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![uv](https://img.shields.io/badge/uv-managed-DE5FE9?logo=uv&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-sqlite--vec-003B57?logo=sqlite&logoColor=white)
+![LiteLLM](https://img.shields.io/badge/LLM-DeepSeek%20V4-4D6BFE)
+![ruff](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
+![License](https://img.shields.io/badge/license-private-lightgrey)
+
+> ZERO 的"大脑":会话无状态推理核 + append-only 痕迹空间。表现层(官网/桌面/移动端)见
+> [`zero`](https://github.com/sikehuang88/zero)。
+
 HDSC succeeds the earlier Stateless Space Activation (SSA) prototype. `ssa`
 remains the internal Python package and a compatibility CLI while the research
 formalization is rebuilt. Legacy SSA terminology denotes reproducible baseline
