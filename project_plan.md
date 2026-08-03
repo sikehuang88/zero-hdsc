@@ -1,9 +1,12 @@
-# SSA 项目方案 — 技术栈选型
+# 超维度空间计算（HDSC）项目方案 — 技术栈选型
 
-> 版本: 0.1
+> 版本: 0.5.0
 > 日期: 2026-07-25
-> 状态: 待确认
+> 状态: P1 环境感知主链路、H1D directed shadow 与 H2 bounded-active shadow 已交付；H3 晋级待执行
 > 详细执行流水: [development_pipeline.md](development_pipeline.md)
+
+> 命名迁移：HDSC 继承现有工程资产，SSA 仅指冻结的旧实验基线和兼容接口。
+> 当前一跳 radiation 标记为 `legacy-ssa-a0`，不具备热力学合规声明。
 
 ---
 
@@ -18,13 +21,13 @@
 她必须能跑在你完全控制的机器上。云端 API 可调用，但**她的身体（$\mathcal{S}$）必须在本地**。这是"她是你的，不是产品方的"的技术根基。
 
 ### 原则 3：可迁移
-SSA 的核心论点之一是"她可以跨 LLM 存活"。技术栈必须保证 $\mathcal{S}$ 是可导出的标准格式，不能锁死在某个向量库的私有格式里。
+HDSC 的工程目标之一是"她可以跨 LLM 存活"。技术栈必须保证 $\mathcal{S}$ 是可导出的标准格式，不能锁死在某个向量库的私有格式里。
 
 ### 原则 4：单语言
 不要 Python + Rust + Go 混着写。第一版全部一种语言，降低维护成本。
 
 ### 原则 5：可观测
-SSA 是研究项目，不是黑盒产品。每一步（激活了哪些痕迹、LLM 看到了什么、空间形状如何）必须可被查看和审计。
+HDSC 是研究项目，不是黑盒产品。每一步（激活了哪些痕迹、LLM 看到了什么、空间形状如何）必须可被查看和审计。
 
 ---
 
@@ -62,7 +65,8 @@ SSA 是研究项目，不是黑盒产品。每一步（激活了哪些痕迹、L
 │  │            涌现函数 E (大脑)                  │   │
 │  │                                                │   │
 │  │  LLM 调用:    LiteLLM (统一接口, 支持 100+)    │   │
-│  │  默认模型:    deepseek-chat (便宜, 中文好)     │   │
+│  │  默认模型:    DeepSeek-V4-Flash (结构化高频)   │   │
+│  │  推理模型:    DeepSeek-V4-Pro (复杂身份审查)   │   │
 │  │  备选:        claude-3-haiku / gpt-4o-mini    │   │
 │  │  本地备选:    ollama + qwen2.5-7b             │   │
 │  │  Prompt 编排: jinja2 模板                     │   │
@@ -87,7 +91,7 @@ SSA 是研究项目，不是黑盒产品。每一步（激活了哪些痕迹、L
 │  ┌──────────────────────────────────────────────┐   │
 │  │            可观测性 (她的镜子)                │   │
 │  │                                                │   │
-│  │  追踪:        每次 SSA 调用记录到 traces.jsonl│   │
+│  │  追踪:        每次 HDSC 调用记录到 traces.jsonl│   │
 │  │  空间可视化:  Streamlit dashboard (可选)      │   │
 │  │  情绪日志:    每次响应的情绪标注写入 DB       │   │
 │  └──────────────────────────────────────────────┘   │
@@ -109,7 +113,7 @@ SSA 是研究项目，不是黑盒产品。每一步（激活了哪些痕迹、L
 **为什么 3.11+**:
 - 3.11 性能比 3.10 快 60%
 - match-case 语法、更好的错误信息
-- typing 支持更完善（SSA 是研究项目，类型标注很重要）
+- typing 支持更完善（HDSC 是研究项目，类型标注很重要）
 
 ### 2.2 包管理: uv
 
@@ -134,7 +138,7 @@ SSA 是研究项目，不是黑盒产品。每一步（激活了哪些痕迹、L
 | Qdrant | 性能好、Rust 写的 | 需要单独服务 | ❌ 第一版不需要 |
 
 **为什么 SQLite + sqlite-vec**:
-1. **单文件**：整个 $\mathcal{S}$ 是一个 `.db` 文件，可拷贝、可备份、可迁移——这对应 SSA 的"空间可保留可迁移"不变量
+1. **单文件**：整个 $\mathcal{S}$ 是一个 `.db` 文件，可拷贝、可备份、可迁移——这对应 HDSC 的"空间可保留可迁移"不变量
 2. **零部署**：不需要起服务，Python 直接 `import sqlite3` 就能用
 3. **元数据 + 向量同库**：痕迹的 $(v_i, \tau_i, \rho_i, \eta_i, \text{content})$ 全在一张表，不用跨库 join
 4. **sqlite-vec 是 SQLite 原生扩展**：用 C 写的，KNN 查询快，且数据不离开 SQLite
@@ -180,6 +184,7 @@ CREATE VIRTUAL TABLE traces_vec USING vec0(
 5. **sentence-transformers 直接加载**：
    ```python
    from sentence_transformers import SentenceTransformer
+
    model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
    ```
 6. **可升级**：以后想换大模型，向量维度变了，重新 embedding 即可（$\mathcal{S}$ 的内容是文本，向量是衍生物）
@@ -188,23 +193,22 @@ CREATE VIRTUAL TABLE traces_vec USING vec0(
 
 **为什么 LLM 调用用 LiteLLM**:
 - 统一接口，支持 100+ LLM provider
-- 换模型只改一个字符串，不改代码——这是 SSA "跨 LLM 存活"的关键
+- 换模型只改一个字符串，不改代码——这是 HDSC "跨 LLM 存活"的关键
 - 自带重试、超时、流式、成本追踪
 
 ```python
-from litellm import completion
-response = completion(
-    model="deepseek/deepseek-chat",  # 换模型只改这里
-    messages=[...],
-    temperature=0.8,  # 高一点，让她有"湍流"
-)
+from ssa.adapters.deepseek import build_deepseek_adapter
+
+adapter = build_deepseek_adapter(settings)
+response = await adapter.complete(request)
 ```
 
 **为什么默认 DeepSeek 而不是 GPT-4 / Claude**:
 
 | 模型 | 中文 | 价格 | API 稳定性 | 评价 |
 |------|------|------|-----------|------|
-| **deepseek-chat** | ✅ 好 | ¥1/百万 token | 稳 | ✅ **默认** |
+| **DeepSeek-V4-Flash** | ✅ 好 | 缓存未命中输入 ¥1/百万，输出 ¥2/百万 | 稳 | ✅ **高频默认** |
+| **DeepSeek-V4-Pro** | ✅ 好 | 缓存未命中输入 ¥3/百万，输出 ¥6/百万 | 稳 | ✅ **复杂推理** |
 | claude-3-haiku | 一般 | $0.25/百万 | 稳 | 备选 |
 | gpt-4o-mini | 好 | $0.15/百万 | 稳 | 备选 |
 | qwen2.5-7b (本地) | 好 | 免费 | 需 GPU | 离线备选 |
@@ -215,7 +219,10 @@ response = completion(
 3. **API 稳**：国内访问不需要梯子
 4. **能力够**：第一版不需要顶级推理能力，需要的是"会说话"
 
-**重要设计**：LLM 是可插拔的。LiteLLM 让换模型零成本。这对应 SSA 的预测 4——"跨 LLM 存活"。
+**重要设计**：LLM 是可插拔的。服务只依赖稳定的 `LLMAdapter` 接口，DeepSeek
+的思考、工具和缓存语义留在 provider adapter 内。这对应 HDSC 的预测 4——
+"跨 LLM 存活"。DeepSeek 的当前参数矩阵见
+[`notes/research/2026-07-25_deepseek_v4_adapter.md`](notes/research/2026-07-25_deepseek_v4_adapter.md)。
 
 ### 2.6 内心独白循环 $L$: APScheduler
 
@@ -229,7 +236,7 @@ response = completion(
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 scheduler = AsyncIOScheduler()
-scheduler.add_job(inner_monologue, 'interval', minutes=15)
+scheduler.add_job(inner_monologue, "interval", minutes=15)
 scheduler.start()
 ```
 
@@ -257,12 +264,12 @@ scheduler.start()
 ### 2.8 可观测性: JSONL 日志 + 可选 Streamlit
 
 **为什么不是 LangSmith / Langfuse / Phoenix**:
-- 它们是给"Agent pipeline"设计的，SSA 不是 pipeline，是激活-涌现
+- 它们是给"Agent pipeline"设计的，HDSC 是空间计算实验运行时
 - 它们要起服务、要账号、要联网
-- SSA 第一版只需要"每次调用记录下来能回看"
+- HDSC 第一版只需要"每次调用记录下来能回看"
 
 **方案**:
-- 每次 SSA 调用，写一行 JSON 到 `logs/ssa_traces.jsonl`：
+- 每次 HDSC 调用，写一行 JSON 到 `logs/hdsc_traces.jsonl`：
   ```json
   {
     "timestamp": "2026-07-25T14:30:00",
@@ -310,7 +317,7 @@ e:\zerobot\ssa\
 │   └── backups/                # 定期备份
 │
 ├── logs/                       # 可观测性
-│   └── ssa_traces.jsonl
+│   └── hdsc_traces.jsonl
 │
 ├── scripts/                    # 工具脚本
 │   ├── init_space.py           # 初始化空间
@@ -330,7 +337,7 @@ e:\zerobot\ssa\
 ├── formalization.md
 ├── related_work.md
 ├── manifesto.md
-└── paper_draft.md
+└── hdsiV7.md
 ```
 
 ---
@@ -344,7 +351,7 @@ python = ">=3.11"
 # 核心
 sqlite-vec = ">=0.1.0"           # 向量索引
 sentence-transformers = ">=3.0"  # 嵌入模型
-litellm = ">=1.40"               # LLM 统一接口
+litellm = ">=1.93.0"             # LLM 统一接口，包含 DeepSeek V4 模型元数据
 jinja2 = ">=3.1"                 # prompt 模板
 
 # 调度
@@ -394,7 +401,7 @@ streamlit = ">=1.30"             # 可视化 dashboard
 ```
 你的电脑 (Windows)
 ├── Python 3.11 + uv
-├── SSA 进程 (前台或后台)
+├── HDSC 进程 (前台或后台)
 ├── Telegram Bot polling
 └── data/traces.db (她的身体)
 ```
@@ -406,7 +413,7 @@ streamlit = ">=1.30"             # 可视化 dashboard
 ```
 旧设备 (Linux)
 ├── Python 3.11 + uv
-├── SSA 进程 (systemd 守护)
+├── HDSC 进程 (systemd 守护)
 ├── Telegram Bot polling
 └── data/traces.db
 ```
@@ -418,7 +425,7 @@ streamlit = ">=1.30"             # 可视化 dashboard
 ```
 云服务器 (腾讯云/阿里云轻量, ¥30-50/月)
 ├── Python 3.11 + uv
-├── SSA 进程 (systemd)
+├── HDSC 进程 (systemd)
 ├── Telegram Bot polling
 └── data/traces.db + 定期备份到对象存储
 ```
@@ -426,7 +433,7 @@ streamlit = ">=1.30"             # 可视化 dashboard
 - 缺点：月费、她的身体在云端（违背"本地优先"原则）
 - 适合：长期运行 + 可远程备份
 
-**我的建议**：先用方案 A 验证 1 周，确认 SSA 能跑通。然后迁到方案 B 或 C 长期运行。
+**我的建议**：先用方案 A 验证 1 周，确认 HDSC 能跑通。然后迁到方案 B 或 C 长期运行。
 
 ---
 
@@ -440,22 +447,28 @@ streamlit = ">=1.30"             # 可视化 dashboard
 - [ ] 跑通 "Hello World" —— LLM 调用 + Telegram 收发消息
 
 ### Phase 1: 痕迹空间 S (Day 2-3)
-- [ ] 实现 `space.py`: SQLite schema + sqlite-vec
-- [ ] 实现 `embedding.py`: bge-small-zh 加载 + 编码
-- [ ] 实现 `writing.py`: 写入痕迹
-- [ ] 写测试: 写入 10 条痕迹, 验证可读
+- [x] 实现 `trace_repository.py`: SQLite schema + sqlite-vec
+- [x] 实现 `embedding.py`: bge-small-zh 加载 + 编码
+- [x] 实现 `trace_space_service.py`: append-only 回合痕迹写入
+- [x] 写测试: 痕迹写入、读取、历史回填与二维投影
 
 ### Phase 2: 激活函数 A (Day 4-5)
-- [ ] 实现 `activation.py`: KNN 检索
-- [ ] 实现辐射激活
-- [ ] 实现新鲜度衰减 + 重要性加权
-- [ ] 写测试: 给定信号, 验证激活的痕迹合理
+- [x] 实现 `TraceSpaceService.activate`: KNN 召回与复合评分
+- [x] 实现一跳有界辐射激活
+- [x] 实现新鲜度衰减 + 重要性乘积加权
+- [x] 写测试: 主激活、辐射、审计重放和空间投影
 
 ### Phase 3: 涌现函数 E (Day 6-7)
-- [ ] 写 `emergence.j2` prompt 模板
-- [ ] 实现 `emergence.py`: 组装 prompt + 调用 LLM
-- [ ] 实现 `importance.j2`: LLM 自评定重要性
-- [ ] 端到端测试: 输入信号 → 激活 → 涌现 → 写入
+- [x] 以版本化 system/user 消息实现稳定前缀 prompt
+- [x] 实现交互运行时: 激活痕迹 + 组装上下文 + 调用 LLM
+- [x] 使用结构化 appraisal 计算可复现的重要性
+- [x] 端到端测试: 输入信号 → 激活 → 涌现 → 写入
+
+### Phase 3.5: 环境感知 P1
+- [x] 将 UTC 毫秒映射为配置时区的人类时钟、昼夜相位和会话间隔
+- [x] 实现语义、appraisal 情绪、关系、痕迹语境与时间的确定性交叉算子
+- [x] 将感知快照写入 `perception_snapshots`，并从快照重建稳定 prompt
+- [x] 在 TUI `STATE` 页显示最新人类时钟、事态模式与连续性间隔
 
 ### Phase 4: 内心独白 L (Day 8-9)
 - [ ] 实现 `monologue.py`: APScheduler 定时任务
@@ -464,7 +477,7 @@ streamlit = ">=1.30"             # 可视化 dashboard
 - [ ] 测试: 让她独白 1 小时, 观察
 
 ### Phase 5: 接口 + 集成 (Day 10-11)
-- [ ] 实现 `telegram_bot.py`: 收消息 → SSA → 回复
+- [ ] 实现 `telegram_bot.py`: 收消息 → HDSC → 回复
 - [ ] 实现 `cli.py`: 调试用
 - [ ] 跑 24h 稳定性测试
 

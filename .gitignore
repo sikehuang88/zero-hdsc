@@ -63,6 +63,17 @@ backups/
 # Logs
 logs/
 *.log
+*.err
+*.out
+
+# Scratch (pytest run dirs, ad-hoc snapshots)
+tmp/
+temp/
+.tmp_*
+
+# Manual archives (use git history instead)
+*.7z
+*.tar.gz
 
 # Model caches
 models/
@@ -83,6 +94,9 @@ desktop.ini
 
 # Build artifacts
 docs/_build/
+
+# Web research cache
+.firecrawl/
 
 # CodeBuddy internal (do not commit)
 .codebuddy/

@@ -106,6 +106,39 @@ class SqliteEventRepository:
         ).fetchall()
         return [self._row_to_event(r) for r in rows]
 
+    def recent_by_conversation(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 30,
+    ) -> list[Event]:
+        """Return the latest conversation events in chronological order."""
+        if not conversation_id.strip():
+            raise ValueError("conversation_id must not be empty")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        rows = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE conversation_id = ?
+            ORDER BY created_at_ms DESC, rowid DESC
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        ).fetchall()
+        return [self._row_to_event(row) for row in reversed(rows)]
+
+    def latest_by_actor(self, conversation_id: str, actor: Actor) -> Event | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE conversation_id = ? AND actor = ?
+            ORDER BY created_at_ms DESC, rowid DESC LIMIT 1
+            """,
+            (conversation_id, actor.value),
+        ).fetchone()
+        return self._row_to_event(row) if row is not None else None
+
     # ------------------------------------------------------------------
     # Mapping
     # ------------------------------------------------------------------

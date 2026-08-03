@@ -24,15 +24,21 @@ class LLMTimeoutError(LLMError):
 class LLMRateLimitError(LLMError):
     """The provider returned a rate-limit error."""
 
-    def __init__(
-        self, message: str, *, retry_after_s: float | None = None, **kwargs: str
-    ) -> None:
+    def __init__(self, message: str, *, retry_after_s: float | None = None, **kwargs: str) -> None:
         super().__init__(message, **kwargs)
         self.retry_after_s = retry_after_s
 
 
 class LLMAuthenticationError(LLMError):
     """API key or credentials are invalid/missing."""
+
+
+class LLMInsufficientBalanceError(LLMError):
+    """The provider account does not have enough balance for the request."""
+
+
+class LLMInvalidRequestError(LLMError):
+    """The provider rejected request parameters or message structure."""
 
 
 class LLMInvalidResponseError(LLMError):
@@ -46,6 +52,8 @@ class LLMProviderUnavailableError(LLMError):
 __all__ = [
     "LLMAuthenticationError",
     "LLMError",
+    "LLMInsufficientBalanceError",
+    "LLMInvalidRequestError",
     "LLMInvalidResponseError",
     "LLMProviderUnavailableError",
     "LLMRateLimitError",

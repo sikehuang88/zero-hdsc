@@ -21,7 +21,6 @@ CREATE TABLE memories (
     status              TEXT    NOT NULL DEFAULT 'active',
     access_count        INTEGER NOT NULL DEFAULT 0,
     last_accessed_at_ms INTEGER,
-    vec_rowid           INTEGER,
     created_at_ms       INTEGER NOT NULL,
     updated_at_ms       INTEGER NOT NULL
 );
@@ -32,7 +31,6 @@ CREATE INDEX idx_memories_status ON memories(status);
 CREATE INDEX idx_memories_importance ON memories(importance);
 CREATE INDEX idx_memories_created_at ON memories(created_at_ms);
 CREATE INDEX idx_memories_content_hash ON memories(content_hash);
-CREATE INDEX idx_memories_vec_rowid ON memories(vec_rowid);
 
 CREATE TABLE memory_evidence (
     memory_id   TEXT    NOT NULL REFERENCES memories(id),
@@ -55,8 +53,8 @@ CREATE INDEX idx_memory_links_target ON memory_links(target_memory_id);
 
 -- The vec0 virtual table for memory embeddings.
 -- NOTE: requires the sqlite-vec extension to be loaded.
--- The dimension is set to 512 to match bge-small-zh-v1.5 (pipeline §2.3).
--- Tests that use a different dimension must create their own vec table.
+-- If the extension is not available, queries against this table will fail;
+-- the Database initializer handles this gracefully (pipeline §11.4).
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
     embedding float[512]
 );

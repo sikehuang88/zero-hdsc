@@ -1,35 +1,36 @@
 [project]
-name = "ssa"
-version = "0.1.0"
-description = "Stateless Space Activation — a digital lifeform prototype"
+name = "hdsc"
+version = "0.5.0"
+description = "Hyperdimensional Space Computing — a digital life research prototype"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-    { name = "SSA Project" },
+    { name = "HDSC Project" },
 ]
 dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
+    "python-dotenv>=1.0",
     "loguru>=0.7",
     "numpy>=1.26",
+    "scipy>=1.12",
     "jinja2>=3.1",
+    "rich>=14.0",
+    "sqlite-vec>=0.1.0",
+    "textual>=3.0",
+    "tzdata>=2026.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 # Core runtime (LLM + embeddings + vector store)
 runtime = [
-    "litellm>=1.40",
+    "litellm>=1.93.0",
     "sentence-transformers>=3.0",
-    "sqlite-vec>=0.1.0",
 ]
 # Telegram interface
 telegram = [
     "python-telegram-bot>=21.0",
-]
-# CLI
-cli = [
-    "typer>=0.12",
 ]
 # Scheduler
 scheduler = [
@@ -41,10 +42,18 @@ dashboard = [
 ]
 # Everything
 all = [
-    "ssa[runtime,telegram,cli,scheduler,dashboard]",
+    "hdsc[runtime,telegram,scheduler,dashboard]",
+]
+web = [
+    "fastapi>=0.115",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.30",
+    "websockets>=15,<17",
+    "msgpack>=1.1,<2",
 ]
 
 [project.scripts]
+hdsc = "ssa.interfaces.cli:main"
 ssa = "ssa.interfaces.cli:main"
 
 [dependency-groups]
@@ -63,6 +72,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ssa"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "ssa/migrations"
+"src/ssa/builtin_skills/zero-web-search/SKILL.md" = "ssa/builtin_skills/zero-web-search/SKILL.md"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -109,7 +122,7 @@ indent-style = "space"
 line-ending = "lf"
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -126,7 +139,7 @@ files = ["src/ssa"]
 exclude = ["numpy/__init__.pyi"]
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec.*", "sentence_transformers.*", "litellm.*", "telegram.*", "apscheduler.*"]
+module = ["sqlite_vec.*", "sentence_transformers.*", "litellm.*", "telegram.*", "apscheduler.*", "scipy.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

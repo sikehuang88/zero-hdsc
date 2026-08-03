@@ -21,8 +21,8 @@
 
 ### Infrastructure
 - sqlite-vec extension loaded in Database.initialize()
-- `memories` table extended with `vec_rowid` INTEGER column
-- Migration 002 updated
+- `memories` table extended with `vec_rowid` through append-only migration 006
+- migration 008 retries `memory_vec` creation when sqlite-vec becomes available later
 
 ## Tests
 
@@ -44,5 +44,5 @@ uv run mypy src/ssa → Success: no issues found in 23 source files
 
 - sqlite-vec 0.1.9 loaded successfully; KNN queries work
 - FakeEmbeddingService uses SHA-256 hash (dim=512 to match vec table)
-- mypy python_version set to 3.12 (numpy 2.5.1 stubs require 3.12+ syntax)
+- Runtime and mypy target Python 3.11; numpy imports use a scoped mypy override
 - MMR uses cosine similarity on content embeddings for diversity

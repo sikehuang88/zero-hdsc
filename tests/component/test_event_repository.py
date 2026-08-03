@@ -26,7 +26,9 @@ from ssa.storage.event_repository import DuplicateEventError, SqliteEventReposit
 
 
 @pytest.fixture
-def repo(tmp_path: Path) -> tuple[SqliteEventRepository, Database, SequentialIdGenerator, FrozenClock]:
+def repo(
+    tmp_path: Path,
+) -> tuple[SqliteEventRepository, Database, SequentialIdGenerator, FrozenClock]:
     db = Database(DatabaseConfig(path=str(tmp_path / "test.db")))
     db.initialize()
     conn = db.connection
@@ -62,9 +64,7 @@ def make_event(
     channel: str = "cli",
     channel_message_id: str | None = None,
 ) -> Event:
-    signal = make_user_signal(
-        content, channel=channel, channel_message_id=channel_message_id
-    )
+    signal = make_user_signal(content, channel=channel, channel_message_id=channel_message_id)
     return normalize_signal(
         signal,
         event_id=ids.new(),
@@ -138,6 +138,29 @@ def test_recent(repo):
     # Most recent first.
     assert recent[0].content == "msg-9"
     assert recent[2].content == "msg-7"
+
+
+def test_recent_by_conversation_is_filtered_and_chronological(repo):
+    r, _db, ids, clock = repo
+    for i in range(5):
+        signal = make_user_signal(
+            f"message-{i}",
+            channel_message_id=f"conversation-{i}",
+            conversation_id="primary" if i != 2 else "other",
+        )
+        event = normalize_signal(
+            signal,
+            event_id=ids.new(),
+            correlation_id=f"corr-{i}",
+            now_ms=clock.now_ms(),
+            source_kind=SourceKind.USER_OBSERVED,
+        )
+        r.append(event)
+        clock.advance_ms(1000)
+
+    events = r.recent_by_conversation("primary", limit=2)
+
+    assert [event.content for event in events] == ["message-3", "message-4"]
 
 
 # ---------------------------------------------------------------------------

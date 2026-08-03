@@ -31,6 +31,7 @@ class MemoryCandidate(BaseModel):
     valence: float
     arousal: float
     contradiction_query: str | None = None
+    derived_by_model: str | None = None
 
     @field_validator("confidence", "importance")
     @classmethod

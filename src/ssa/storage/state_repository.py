@@ -10,13 +10,15 @@ import sqlite3
 from typing import Any
 
 from ssa.domain.state import OrganismState
+from ssa.ids import IdGenerator
 
 
 class StateRepository:
     """Versioned state snapshot repository (pipeline §8.2 state_snapshots)."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, ids: IdGenerator) -> None:
         self._conn = conn
+        self._ids = ids
 
     def latest(self) -> OrganismState | None:
         """Return the latest state snapshot, or None if none exists."""
@@ -34,34 +36,48 @@ class StateRepository:
 
         Pipeline §11.2: optimistic locking.
         """
-        current = self.latest()
-        current_version = current.version if current else 0
+        required_version = expected_version + 1
+        if state.version != required_version:
+            raise ValueError(f"State version must be {required_version}, got {state.version}")
 
-        if current_version != expected_version:
-            raise StateVersionConflict(
-                f"Expected version {expected_version}, but current is {current_version}"
-            )
-
-        import uuid
-        snapshot_id = uuid.uuid4().hex
+        snapshot_id = self._ids.new()
         state_json = json.dumps(state.model_dump(mode="json"))
 
-        self._conn.execute(
+        cursor = self._conn.execute(
             """
             INSERT INTO state_snapshots
                 (id, previous_id, cause_event_id, version, state_json, created_at_ms)
-            VALUES (?, ?, ?, ?, ?, ?)
+            SELECT
+                ?,
+                (SELECT id FROM state_snapshots ORDER BY version DESC LIMIT 1),
+                ?, ?, ?, ?
+            WHERE COALESCE(
+                (SELECT MAX(version) FROM state_snapshots),
+                0
+            ) = ?
             """,
             (
                 snapshot_id,
-                None,  # TODO: link to previous snapshot ID
                 cause_event_id,
                 state.version,
                 state_json,
                 state.updated_at_ms,
+                expected_version,
             ),
         )
+        if cursor.rowcount != 1:
+            current = self.latest()
+            current_version = current.version if current else 0
+            raise StateVersionConflict(
+                f"Expected version {expected_version}, but current is {current_version}"
+            )
         return state
+
+    def get_by_version(self, version: int) -> OrganismState | None:
+        row = self._conn.execute(
+            "SELECT * FROM state_snapshots WHERE version = ?", (version,)
+        ).fetchone()
+        return self._row_to_state(row) if row is not None else None
 
     @staticmethod
     def _row_to_state(row: sqlite3.Row | dict[str, Any]) -> OrganismState:

@@ -14,7 +14,7 @@ from typing import Any
 from ssa.adapters.embedding import EmbeddingService
 from ssa.adapters.llm import ChatMessage, LLMAdapter, LLMRequest
 from ssa.clock import Clock
-from ssa.config import RetrievalConfig
+from ssa.config import RetrievalConfig, ThinkingMode
 from ssa.domain.enums import MemoryType, SourceKind
 from ssa.domain.events import Event
 from ssa.domain.memories import Memory, MemoryCandidate
@@ -42,6 +42,26 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _coerce_memory_type(value: object) -> MemoryType:
+    normalized = str(value or MemoryType.SEMANTIC.value).strip().casefold().replace("-", "_")
+    try:
+        return MemoryType(normalized)
+    except ValueError:
+        if "relationship" in normalized:
+            return MemoryType.RELATIONSHIP
+        if "promise" in normalized or "commit" in normalized:
+            return MemoryType.PROMISE
+        if "unresolved" in normalized or "conflict" in normalized:
+            return MemoryType.UNRESOLVED
+        if "reflection" in normalized:
+            return MemoryType.REFLECTION
+        if normalized.startswith("self") or "identity" in normalized:
+            return MemoryType.SELF
+        if "episode" in normalized or "event" in normalized:
+            return MemoryType.EPISODIC
+        return MemoryType.SEMANTIC
+
+
 class MemoryWriteService:
     """Orchestrates the memory write pipeline (M05)."""
 
@@ -58,6 +78,7 @@ class MemoryWriteService:
         prompt_version: str = "memory_extract_v1",
         embedding_model_name: str = "bge-small-zh-v1.5",
         embedding_dim: int = 512,
+        default_model: str = "deepseek/deepseek-v4-flash",
     ) -> None:
         self._llm = llm
         self._embedding = embedding
@@ -69,6 +90,7 @@ class MemoryWriteService:
         self._prompt_version = prompt_version
         self._emb_model = embedding_model_name
         self._emb_dim = embedding_dim
+        self._default_model = default_model
 
     async def extract_candidates(
         self,
@@ -76,9 +98,9 @@ class MemoryWriteService:
         agent_event: Event | None = None,
     ) -> list[MemoryCandidate]:
         """Use the LLM to extract memory candidates from this turn's events."""
-        events_desc = f"User said: {user_event.content}"
+        events_desc = f"User event id={user_event.id}: {user_event.content}"
         if agent_event is not None:
-            events_desc += f"\nAgent responded: {agent_event.content}"
+            events_desc += f"\nAgent event id={agent_event.id}: {agent_event.content}"
 
         schema: dict[str, Any] = {
             "type": "object",
@@ -101,8 +123,13 @@ class MemoryWriteService:
                             "contradiction_query": {"type": ["string", "null"]},
                         },
                         "required": [
-                            "memory_type", "content", "evidence_event_ids",
-                            "confidence", "importance", "valence", "arousal",
+                            "memory_type",
+                            "content",
+                            "evidence_event_ids",
+                            "confidence",
+                            "importance",
+                            "valence",
+                            "arousal",
                         ],
                     },
                 }
@@ -116,13 +143,17 @@ class MemoryWriteService:
                 ChatMessage.system(
                     "You are a memory extraction system. Extract memorable facts "
                     "from the conversation below. Only extract things worth "
-                    "remembering long-term. Output JSON with a 'candidates' array."
+                    "remembering long-term. Every candidate must cite one or more "
+                    "supplied event IDs exactly. Output compact JSON with a 'candidates' "
+                    "array. Every item must contain memory_type, content, "
+                    "evidence_event_ids, confidence, importance, valence, and arousal."
                 ),
                 ChatMessage.user(events_desc),
             ],
-            model="deepseek/deepseek-chat",
+            model=self._default_model,
             temperature=0.3,
             max_tokens=1024,
+            thinking=ThinkingMode.DISABLED,
             prompt_version=self._prompt_version,
             json_schema=schema,
         )
@@ -136,17 +167,41 @@ class MemoryWriteService:
 
         for raw in raw_candidates:
             try:
-                evidence_ids = raw.get("evidence_event_ids", [])
-                valid_evidence = [
-                    eid for eid in evidence_ids if self._event_lookup(eid) is not None
-                ]
-                if not valid_evidence:
-                    valid_evidence = [user_event.id]
+                raw_evidence_ids = raw.get("evidence_event_ids", raw.get("event_ids", []))
+                if not isinstance(raw_evidence_ids, list) or any(
+                    not isinstance(eid, str) for eid in raw_evidence_ids
+                ):
+                    logger.warning(
+                        "Skipping memory candidate with malformed evidence IDs: %s",
+                        raw_evidence_ids,
+                    )
+                    continue
+                allowed_evidence = {user_event.id}
+                if agent_event is not None:
+                    allowed_evidence.add(agent_event.id)
+                if not raw_evidence_ids:
+                    evidence_ids = [user_event.id]
+                    if agent_event is not None:
+                        evidence_ids.append(agent_event.id)
+                    logger.info(
+                        "Memory candidate omitted evidence IDs; using the supplied turn as "
+                        "model-inference evidence"
+                    )
+                else:
+                    evidence_ids = raw_evidence_ids
+                if any(eid not in allowed_evidence for eid in evidence_ids):
+                    logger.warning(
+                        "Skipping memory candidate with invalid evidence IDs: %s",
+                        evidence_ids,
+                    )
+                    continue
+                valid_evidence = list(dict.fromkeys(evidence_ids))
 
                 # Derive source_kind from context (pipeline §14.3 step 4).
-                if user_event.id in valid_evidence:
+                evidence_set = set(valid_evidence)
+                if evidence_set == {user_event.id}:
                     source = SourceKind.USER_OBSERVED
-                elif agent_event and agent_event.id in valid_evidence:
+                elif agent_event is not None and evidence_set == {agent_event.id}:
                     source = SourceKind.AGENT_OUTPUT
                 else:
                     source = SourceKind.MODEL_INFERENCE
@@ -157,26 +212,25 @@ class MemoryWriteService:
                     raw_conf = min(raw_conf, 0.6)
 
                 candidate = MemoryCandidate(
-                    memory_type=MemoryType(raw["memory_type"]),
-                    content=raw["content"],
+                    memory_type=_coerce_memory_type(raw.get("memory_type")),
+                    content=raw.get("content", raw.get("fact", "")),
                     source_kind=source,
                     evidence_event_ids=valid_evidence,
                     confidence=raw_conf,
-                    importance=float(raw.get("importance", 0.5)),
+                    importance=float(raw.get("importance", 0.6)),
                     valence=float(raw.get("valence", 0.0)),
                     arousal=float(raw.get("arousal", 0.3)),
                     contradiction_query=raw.get("contradiction_query"),
+                    derived_by_model=response.model,
                 )
                 candidates.append(candidate)
-            except (ValueError, KeyError) as exc:
+            except (TypeError, ValueError, KeyError) as exc:
                 logger.warning("Skipping invalid memory candidate: %s", exc)
                 continue
 
         return candidates
 
-    def write_candidates(
-        self, candidates: list[MemoryCandidate]
-    ) -> MemoryWriteResult:
+    def write_candidates(self, candidates: list[MemoryCandidate]) -> MemoryWriteResult:
         """Validate, dedup, and persist memory candidates.
 
         Pipeline §14.3 steps 4-13.
@@ -185,6 +239,7 @@ class MemoryWriteService:
         now_ms = self._clock.now_ms()
 
         for candidate in candidates:
+            candidate = self._validated_candidate(candidate)
             chash = _content_hash(candidate.content)
 
             # Exact content hash dedup.
@@ -250,7 +305,7 @@ class MemoryWriteService:
                 embedding_model=self._emb_model,
                 embedding_dim=self._emb_dim,
                 content_hash=chash,
-                derived_by_model=None,
+                derived_by_model=candidate.derived_by_model,
                 prompt_version=self._prompt_version,
                 status="active",
                 access_count=0,
@@ -259,18 +314,17 @@ class MemoryWriteService:
                 updated_at_ms=now_ms,
             )
 
-            self._repo.insert(memory, vec.as_bytes())
-
-            # Add evidence links.
-            for eid in candidate.evidence_event_ids:
-                self._repo.add_evidence(memory_id, eid, "supports")
-
-            # Generate one-hop links to similar memories.
-            for mem, sim in similar[:5]:
-                if mem.id != memory_id:
-                    self._repo.add_link(
-                        memory_id, mem.id, "semantic", float(sim), now_ms
-                    )
+            links = [
+                (mem.id, "semantic", float(sim), now_ms)
+                for mem, sim in similar[:5]
+                if mem.id != memory_id
+            ]
+            self._repo.insert_bundle(
+                memory,
+                vec.as_bytes(),
+                candidate.evidence_event_ids,
+                links,
+            )
 
             result.created.append(memory_id)
 
@@ -282,6 +336,29 @@ class MemoryWriteService:
             len(result.conflicted),
         )
         return result
+
+    def _validated_candidate(self, candidate: MemoryCandidate) -> MemoryCandidate:
+        if not candidate.evidence_event_ids:
+            raise ValueError("memory candidate requires at least one evidence event")
+        events = [self._event_lookup(event_id) for event_id in candidate.evidence_event_ids]
+        if any(event is None for event in events):
+            raise ValueError("memory candidate references an unknown evidence event")
+        present = [event for event in events if event is not None]
+        if candidate.source_kind == SourceKind.USER_OBSERVED and any(
+            event.actor.value != "user" for event in present
+        ):
+            raise ValueError("user-observed memory evidence must come from user events")
+        if candidate.source_kind == SourceKind.AGENT_OUTPUT and any(
+            event.actor.value != "agent" for event in present
+        ):
+            raise ValueError("agent-output memory evidence must come from agent events")
+        if candidate.source_kind == SourceKind.WORLD_OBSERVED and any(
+            event.source_kind != SourceKind.WORLD_OBSERVED for event in present
+        ):
+            raise ValueError("world-observed memory evidence must retain world provenance")
+        if candidate.source_kind == SourceKind.MODEL_INFERENCE and candidate.confidence > 0.6:
+            return candidate.model_copy(update={"confidence": 0.6})
+        return candidate
 
 
 __all__ = ["MemoryWriteResult", "MemoryWriteService"]

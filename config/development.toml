@@ -4,6 +4,7 @@
 timezone = "Asia/Shanghai"
 
 [database]
+# Compatibility path retained so upgrades continue the existing identity.
 path = "data/ssa.dev.db"
 
 [budget]

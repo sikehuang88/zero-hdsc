@@ -1,17 +1,24 @@
-# SSA default configuration.
+# HDSC default configuration.
 # Environment-specific overrides live in config/development.toml etc.
 # Secrets NEVER go here — they live in environment variables only.
 
 [app]
-name = "ssa"
+name = "hdsc"
 timezone = "UTC"
 
 [llm]
-model = "deepseek/deepseek-chat"
+model = "deepseek/deepseek-v4-flash"
+reasoning_model = "deepseek/deepseek-v4-pro"
+base_url = "https://api.deepseek.com"
+beta_base_url = "https://api.deepseek.com/beta"
 temperature = 0.8
 max_tokens = 1024
-timeout_seconds = 30
+timeout_seconds = 120
 retry_count = 2
+json_retry_count = 1
+thinking_mode = "disabled"
+reasoning_effort = "high"
+user_id = "hdsc-primary"
 
 [embedding]
 model = "BAAI/bge-small-zh-v1.5"
@@ -31,6 +38,19 @@ source_trust_weight = 0.10
 dedup_similarity_threshold = 0.92
 radiation_decay = 0.5
 
+[hdsc]
+# H2 remains shadow-only; these values never alter the serving prompt path.
+h2_shadow_enabled = true
+h2_active_capacity = 8
+h2_candidate_top_k = 4
+h2_cluster_bits = 16
+h2_retention = 0.80
+h2_injection_rate = 0.15
+h2_hysteresis = 0.02
+h2_score_lipschitz_bound = 1.0
+h2_gain_margin = 0.05
+h2_mass_tolerance = 1e-10
+
 [initiative]
 daily_limit = 3
 cooldown_minutes = 240
@@ -45,6 +65,7 @@ sync_llm_per_turn = 3
 goal_sync_llm_per_turn = 2
 
 [database]
+# Compatibility path: existing installations already persist identity here.
 path = "data/ssa.db"
 busy_timeout_ms = 5000
 
@@ -54,6 +75,20 @@ valence_signal_weight = 0.25
 arousal_signal_weight = 0.30
 arousal_decay_per_hour = 0.10
 refresh_delta_threshold = 0.02
+
+[perception]
+context_window_events = 16
+fresh_gap_minutes = 15
+long_gap_hours = 6.0
+mode_temperature = 0.30
+
+[world]
+enabled = true
+observe_interval_seconds = 300
+watched_paths = []
+calendar_json_paths = []
+observe_foreground_window = false
+material_salience = 0.60
 
 [relationship]
 normal_delta_cap = 0.03
@@ -73,6 +108,110 @@ urgency_continuity_weight = 0.10
 candidate_confidence_cap = 0.6
 active_confidence_threshold = 0.7
 active_min_age_days = 7
+review_interval_agent_events = 4
+review_window_events = 24
+
+[tools]
+enabled = true
+max_rounds = 8
+default_timeout_seconds = 60
+max_output_chars = 32000
+allow_elevation = true
+powershell_executable = "powershell.exe"
+
+[win32]
+enabled = true
+clipboard_enabled = true
+max_windows = 64
+max_processes = 128
+max_directory_entries = 256
+max_clipboard_chars = 16000
+
+[external_truth]
+enabled = true
+enabled_sources = [
+  "weather",
+  "sun_times",
+  "holidays",
+  "geocode",
+  "news",
+  "radio",
+  "music",
+  "translate",
+  "service_status",
+]
+request_timeout_seconds = 12
+max_response_bytes = 524288
+cache_ttl_seconds = 300
+min_request_interval_ms = 1100
+user_agent = "HDSC/0.5 external-truth"
+
+[firecrawl]
+enabled = true
+base_url = "https://api.firecrawl.dev/v2"
+request_timeout_seconds = 60
+max_response_bytes = 4194304
+max_result_content_chars = 8000
+
+[multimodal]
+enabled = true
+model = "gpt-5.6-luna"
+base_url = "https://sky1818.com/v1"
+reasoning_effort = "medium"
+timeout_seconds = 180
+max_files = 8
+max_file_bytes = 20971520
+max_total_bytes = 41943040
+max_text_chars_per_file = 120000
+max_response_bytes = 4194304
+
+[offline_agency]
+enabled = true
+interval_minutes = 30
+min_user_absence_minutes = 20
+max_cycles_per_day = 12
+external_observation_every_cycles = 4
+reflection_max_tokens = 480
+artifact_max_chars = 4000
+news_category = "ai"
+min_energy = 0.35
+
+[inner_life]
+enabled = true
+heartbeat_seconds = 60
+min_wait_minutes = 10
+base_wait_minutes = 45
+max_wait_minutes = 720
+reply_half_life_minutes = 120
+affect_half_life_minutes = 180
+offline_entry_threshold = 0.58
+offline_exit_threshold = 0.42
+min_offline_energy = 0.30
+
+[emotion_library]
+enabled = true
+min_intensity = 0.35
+recall_limit = 6
+candidate_limit = 240
+recency_half_life_days = 45.0
+backfill_limit = 500
+expression_library_path = "emotion-value-library"
+expression_entry_limit = 5
+expression_scene_limit = 2
+
+[reflective_learning]
+enabled = true
+schedule_interval_minutes = 15
+consolidation_interval_minutes = 15
+outcome_interval_minutes = 60
+min_reflection_priority = 0.35
+min_critic_score = 0.62
+min_evidence_count = 1
+experiment_duration_hours = 6
+experiment_min_observations = 1
+max_runs_per_cycle = 4
+max_proposals_per_cycle = 8
+policy_experiments_enabled = true
 
 [ablation]
 # Baseline switches: B0..B5. See pipeline §2.6.

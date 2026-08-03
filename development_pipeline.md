@@ -1,10 +1,14 @@
-# 数字生命体开发模块流水
+# 超维度空间计算（HDSC）开发模块流水
 
 > 版本: 0.1
 > 日期: 2026-07-25
 > 状态: 执行基线
 > 适用范围: 单用户、文本优先、本地持久化的数字女友原型
-> 关联文档: `project_plan.md`、`formalization.md`、`paper_draft.md`
+> 关联文档: `project_plan.md`、`formalization.md`、`hdsiV7.md`
+
+> 科学边界：旧 SSA 激活器只作为 `legacy-ssa-a0` 回放基线。HDSC 新传播
+> 内核通过热力学、图论、数值分析、信息论、认知科学和因果实验门禁后，
+> 才能进入数字生命体的主提示上下文。
 
 ---
 
@@ -157,12 +161,14 @@ class Actor(str, Enum):
     SYSTEM = "system"
     WORLD = "world"
 
+
 class SourceKind(str, Enum):
     USER_OBSERVED = "user_observed"
     AGENT_OUTPUT = "agent_output"
     MODEL_INFERENCE = "model_inference"
     SYSTEM_DERIVED = "system_derived"
     WORLD_OBSERVED = "world_observed"
+
 
 class MemoryType(str, Enum):
     EPISODIC = "episodic"
@@ -172,6 +178,7 @@ class MemoryType(str, Enum):
     PROMISE = "promise"
     UNRESOLVED = "unresolved"
     REFLECTION = "reflection"
+
 
 class ActionIntent(str, Enum):
     ACKNOWLEDGE = "acknowledge"
@@ -674,26 +681,37 @@ Definition of Done：新机器只需 Python 和 uv，即可在十分钟内完成
 秘密只存放在环境变量：
 
 ```text
-SSA_LLM_API_KEY
-SSA_TELEGRAM_BOT_TOKEN
-SSA_EXPORT_PASSWORD
+HDSC_LLM_API_KEY / DEEPSEEK_API_KEY
+HDSC_TELEGRAM_BOT_TOKEN
+HDSC_EXPORT_PASSWORD
 ```
 
 行为与实验参数进入版本控制：
 
 ```text
-SSA_TIMEZONE
-SSA_LLM_MODEL
-SSA_LLM_TEMPERATURE
-SSA_EMBEDDING_MODEL
-SSA_EMBEDDING_DIM
-SSA_RETRIEVAL_CANDIDATES
-SSA_RETRIEVAL_FINAL_K
-SSA_INITIATIVE_DAILY_LIMIT
-SSA_INITIATIVE_COOLDOWN_MINUTES
-SSA_BACKGROUND_DAILY_LLM_BUDGET
-SSA_QUIET_HOURS_START
-SSA_QUIET_HOURS_END
+HDSC_TIMEZONE
+HDSC_LLM_MODEL
+HDSC_LLM_REASONING_MODEL
+HDSC_LLM_BASE_URL
+HDSC_LLM_BETA_BASE_URL
+HDSC_LLM_TEMPERATURE
+HDSC_LLM_TOP_P
+HDSC_LLM_MAX_TOKENS
+HDSC_LLM_TIMEOUT_SECONDS
+HDSC_LLM_RETRY_COUNT
+HDSC_LLM_JSON_RETRY_COUNT
+HDSC_LLM_THINKING_MODE
+HDSC_LLM_REASONING_EFFORT
+HDSC_DEEPSEEK_USER_ID
+HDSC_EMBEDDING_MODEL
+HDSC_EMBEDDING_DIM
+HDSC_RETRIEVAL_CANDIDATES
+HDSC_RETRIEVAL_FINAL_K
+HDSC_INITIATIVE_DAILY_LIMIT
+HDSC_INITIATIVE_COOLDOWN_MINUTES
+HDSC_BACKGROUND_DAILY_LLM_BUDGET
+HDSC_QUIET_HOURS_START
+HDSC_QUIET_HOURS_END
 ```
 
 ### 10.3 公共接口
@@ -702,8 +720,10 @@ SSA_QUIET_HOURS_END
 class Clock(Protocol):
     def now_ms(self) -> int: ...
 
+
 class IdGenerator(Protocol):
     def new(self) -> str: ...
+
 
 def load_settings() -> Settings: ...
 ```
@@ -733,10 +753,12 @@ class Database:
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]: ...
 
+
 class EventRepository(Protocol):
     def append(self, event: Event) -> Event: ...
     def get(self, event_id: str) -> Event | None: ...
     def find_by_channel_message(self, channel: str, message_id: str) -> Event | None: ...
+
 
 class SnapshotRepository(Protocol, Generic[T]):
     def latest(self) -> T: ...
@@ -845,6 +867,7 @@ class EmbeddingVector(BaseModel):
     dimension: int
     normalized: bool
 
+
 class EmbeddingService(Protocol):
     def embed_one(self, text: str) -> EmbeddingVector: ...
     def embed_many(self, texts: Sequence[str]) -> list[EmbeddingVector]: ...
@@ -857,24 +880,59 @@ class LLMRequest(BaseModel):
     purpose: str
     messages: list[ChatMessage]
     model: str
-    temperature: float
+    temperature: float | None
+    top_p: float | None
     max_tokens: int
     prompt_version: str
     json_schema: dict | None = None
     seed: int | None = None
+    thinking: ThinkingMode | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    stop: str | list[str] | None = None
+    tools: list[dict] = Field(default_factory=list)
+    tool_choice: str | dict | None = None
+    user_id: str | None = None
+    logprobs: bool = False
+    top_logprobs: int | None = None
+    timeout_seconds: int | None = None
+
 
 class LLMResponse(BaseModel):
     text: str
     parsed: dict | None
     provider: str
     model: str
+    response_id: str
+    finish_reason: str
+    native_finish_reason: str | None
+    reasoning_content: str | None
+    tool_calls: list[ToolCall]
+    logprobs: LLMLogprobs | None
+    system_fingerprint: str | None
     input_tokens: int
     output_tokens: int
+    total_tokens: int
+    prompt_cache_hit_tokens: int
+    prompt_cache_miss_tokens: int
+    reasoning_tokens: int
     latency_ms: int
+
 
 class LLMAdapter(Protocol):
     async def complete(self, request: LLMRequest) -> LLMResponse: ...
 ```
+
+DeepSeek KV Cache 采用完整前缀匹配。所有 LLM 请求按以下稳定性顺序组装：
+
+1. 稳定且版本化的 system 提示词；
+2. 固定输出约束和 schema 描述；
+3. 可复用的长期上下文与历史消息；
+4. 本轮新增事件、候选记忆等高变化信息，集中放在最后的 user 消息。
+
+system 消息只允许形成连续的开头区段。DeepSeek adapter 原样传输消息顺序，发现
+system 位于 user、assistant 或 tool 之后时将请求判为无效，避免隐式重排改变语义。
+缓存效率通过 `LLMResponse.cache_hit_ratio = hit / (hit + miss)` 观测；provider 未返回
+缓存统计时该值为 `0.0`。
 
 统一错误类型：
 
@@ -882,6 +940,8 @@ class LLMAdapter(Protocol):
 LLMTimeoutError
 LLMRateLimitError
 LLMAuthenticationError
+LLMInsufficientBalanceError
+LLMInvalidRequestError
 LLMInvalidResponseError
 LLMProviderUnavailableError
 ```
@@ -1007,6 +1067,7 @@ class RetrievalContext(BaseModel):
     allowed_source_kinds: set[SourceKind]
     token_budget: int
 
+
 class RetrievedMemory(BaseModel):
     memory_id: str
     content: str
@@ -1015,6 +1076,7 @@ class RetrievedMemory(BaseModel):
     score: float
     score_components: dict[str, float]
     retrieval_reason: str
+
 
 class MemoryRetrievalService(Protocol):
     def prefetch_for_appraisal(
@@ -1072,7 +1134,196 @@ source_trust        0.10
 - 高重要性低语义相似候选能通过扩大候选集进入重排。
 - 一跳扩展不会超过配置上限。
 - 8 条最终记忆中重复率低于 10%。
+
+### 15.7 Legacy SSA-A0 痕迹空间运行合同
+
+痕迹空间与抽取式长期记忆是两个不同层次：长期记忆会去重、合并和冲突标记；
+episode trace 对每个完整 user/agent 回合追加一次，内容和写入属性保持不可变。
+
+```text
+W(user_event, agent_event, appraisal) -> immutable episode trace
+A(query, S, t) -> main activations + one-hop radiation
+score = semantic_similarity * exp(-age_days / 30) * importance
+```
+
+每次激活保存 query event、rank、总分、semantic、freshness、importance 和
+activation kind，供因果审计与可视化重放。TUI 使用真实 embedding 的 PCA 二维投影；
+主激活、辐射节点、新痕迹和语义边必须采用不同符号。已有事件在启动时执行幂等回填，
+以便升级前的对话也进入空间。
 - 返回结果始终包含 score components。
+
+### 15.8 HDSC-H1 被动传导 shadow 合同
+
+`legacy-ssa-a0` 是当前主链路唯一启用的激活器。HDSC-H1 只定义可逆对称
+参考图，只能在离线或
+shadow 模式运行，模型标识为 `hdsc-h1-c1-shadow`，不得将其输出直接拼入
+生成 prompt。
+
+```text
+g_i = positive_kernel(cos(query, vector_i), theta)^p
+      * freshness_i^alpha * importance_i^beta
+q_i = Q0 * g_i / sum(g_j for selected source traces)
+K = K.T >= 0
+L = diag(K @ 1) - K
+u_diffused = exp(-t * L) @ q
+u_final = exp(-kappa * t) * u_diffused
+```
+
+这里 `q/u` 是无量纲的计算激活质量，不得命名或记录为焦耳、热量或温度。
+H1 每次运行必须输出：`input_mass`、`output_mass`、`dissipated_mass`、守恒
+残差、互易残差、Laplacian 行和残差、最小节点质量、扩散前后 Dirichlet
+量、Shannon 熵、`modeled_scale=macro-coarse-grained` 和
+`microstate_status=unmodeled`。验收条件为：
+
+- `K` 非负且对称；有向或负电导输入直接失败。
+- 有向拓扑不得通过 `(K + K.T) / 2` 转换后套用 H1；必须进入 H1D。
+- `u_diffused >= 0`，闭系统质量保持 `Q0`。
+- `input = output + dissipated`，float64 残差不超过 `1e-10`。
+- 纯扩散 Dirichlet 量不增加，断连分量不交换质量。
+- 节点置换、连续时间步合成和单节点退化测试通过。
+- 结果只写入 shadow 审计，不改变 organism state、memory 或生成上下文。
+- 宏观不变量不得外推为微观轨迹可预测性；晋级前执行条件方差、lumpability、
+  残差自相关和有限时 Lyapunov 诊断。
+- append-only 只约束审计档案；行为活动态必须限制节点/语义簇容量、固定总预算、
+  同簇重复归一、单轮图变化和活动集 churn。
+- 分别测量 `previous response -> next user signal` 与
+  `previous response -> trace/graph -> next response` 两条闭环增益。
+
+实现：`src/ssa/hdsc/transport.py`；性质测试：
+`tests/property/test_hdsc_h1_transport.py`。只有完成历史回放、基线盲测、
+硬件功耗标定和跨学科评审，才可申请显式配置晋级。
+
+### 15.9 HDSC-H2 有界活动空间 shadow 合同
+
+H2 模型标识为 `hdsc-h2-bounded-active-shadow`，声明等级为 C0-M。它将完整
+archive 与活动态分离：archive 继续追加，活动态最多包含固定数量的语义簇和
+一个 null reservoir，总质量恒为 1。
+
+```text
+archive_(t+1) = archive_t append episode_t
+proposal_score[c] = max(relevance * novelty for candidate in cluster c)
+mu_hat = retention * mu_t
+         + injection_rate * proposal_t
+         + (1 - retention - injection_rate) * delta_null
+mu_(t+1) = project_capacity_overflow_to_null(mu_hat)
+```
+
+配置合同：
+
+```text
+HDSC_H2_SHADOW_ENABLED=true
+HDSC_H2_ACTIVE_CAPACITY=8
+HDSC_H2_CANDIDATE_TOP_K=4
+HDSC_H2_CLUSTER_BITS=16
+HDSC_H2_RETENTION=0.80
+HDSC_H2_INJECTION_RATE=0.15
+HDSC_H2_HYSTERESIS=0.02
+```
+
+运行顺序：
+
+1. serving engine 使用 legacy 激活构建 prompt。
+2. LLM 生成回复并写入完整 episode trace。
+3. H2 使用固定超平面码本生成候选 bucket 和不可变原型；embedding model、
+   维度、位数、码本版本和超平面内容共同确定 semantic partition hash。
+4. H2 以“bucket 当前是否活动”导出新颖度并推进 bounded state；不读取无法从
+   archive 重建的 appraisal 临时 novelty。任何异常只进入 shadow failure audit。
+5. snapshot 同时读取 archive、serving activation 和 H2 audit。
+6. 启动时按 archive 时间顺序重放 H2，禁止复用 `trace_activations`。
+
+验收：
+
+- 开关 H2 前后 `LLMRequest.messages` 完全一致。
+- `active_count <= capacity`，archive 增长不改变容量。
+- 总质量恒为 1，溢出质量进入 null，不重新归一化放大。
+- 同簇候选复制不改变行为状态；候选排列不改变输出。
+- 固定支持、相同提议下，总变差距离按 `retention` 收缩。
+- SimHash 超平面、零分进入、top-K 或 hysteresis-adjusted capacity 任一边界缺少
+  正间隔时证书为 `abstain`。
+- proposal 归一化增益按 `selected_count * score_lipschitz / total_score` 进入容量
+  半径；小总分导致半径低于数值容差时必须 `abstain`。
+- 用户反馈增益缺失时 closed-loop gate 显示 `not-measured`。
+- 完整 episode 后 `evaluated_archive_count == archive_count`。
+- 重启重放后的 active state 和 audit 可复现。
+- `state.step != archive_count`、归档缺向量或 semantic partition 不匹配时不得显示
+  `passed`，且不得影响 legacy serving 与已落库 episode。
+
+实现：`src/ssa/hdsc/active_space.py`；性质测试：
+`tests/property/test_hdsc_h2_active_space.py`。H2 当前使用恒等非扩张传输；
+H1 传导与 H2 活动态的组合留给后续 H3 门禁。
+
+### 15.10 HDSC-H1D 有向非可逆传导 shadow 合同
+
+H1D 模型标识为 `hdsc-h1d-directed-markov-shadow`，声明等级为 C0-M。
+速率矩阵使用 `rates[target, source]` 约定，完整保留时间、证据和反馈关系方向。
+
+```text
+R[target, source] >= 0
+Q = R - diag(column_sum(R))
+1.T @ Q = 0
+P(t) = exp(t * Q)
+u_transported = P(t) @ u0
+u_final = exp(-kappa * t) * u_transported
+```
+
+架构合同：
+
+- `semantic` 是互易关系，可作为 H1 对称参考分量。
+- `temporal-forward` 从旧痕迹指向新痕迹，只声明时间方向，不声明因果。
+- 完整有向拓扑由 H1D 处理，禁止使用 `(R + R.T) / 2` 制造反向边。
+- legacy radiation 只读取 `semantic`；H1D 结果不进入 prompt。
+
+验收：
+
+- 生成元非对角元素非负且列和为零。
+- `exp(tQ)` 非负、列随机、满足半群组合。
+- 闭系统质量守恒；显式 sink 单独记为 dissipated mass。
+- Markov 核在 $L_1$ 上非扩张，节点置换不改变结果。
+- 非对称指数、互易速率质量和有向剩余速率质量分别审计。
+- 不沿用 H1 的 Dirichlet、双随机、Shannon 单调或均匀稳态结论。
+- 提供严格正稳态时检查 $D_{KL}(P_tp\|\pi)\le D_{KL}(p\|\pi)$。
+- 缺少反向支持时有限熵产生门禁为 `abstain`；物理热力学状态保持
+  `not-calibrated`。
+
+实现：`src/ssa/hdsc/directed_transport.py`；性质测试：
+`tests/property/test_hdsc_h1d_directed_transport.py`。H1D 与 H2 的组合和行为晋级
+仍由 H3 单独验证。
+
+### 15.11 P1 环境感知 serving 合同
+
+P1 模型标识为 `hdsc-p1-environment-perception`，算子版本为
+`semantic-affect-context-time-v1`。它读取当前用户事件、结构化 appraisal、
+organism/relationship 快照、legacy 激活痕迹和近期事件，不读取 H1D/H2 shadow
+结果。
+
+```text
+time = project_utc_to_human_clock(
+    timezone, day_phase, quiet_hours, last_event_gap, last_user_gap
+)
+semantic = detect(question, directive, disclosure, autobiography,
+                  relationship, temporal_reference, information_gap)
+affect = derive(valence, arousal, urgency, certainty)
+context = derive(trace_support, continuity, freshness, relationship, unresolved)
+cross = [semantic*affect, semantic*context, affect*context,
+         time*context, directive*urgency*controllability]
+mode_probability = softmax(versioned_logits / mode_temperature)
+posture = response_controls(mode_probability, affect, context, time)
+```
+
+运行合同：
+
+1. UTC 毫秒是数据库唯一时间基准，本地时间只由 IANA timezone 派生。
+2. appraisal 必须先于本轮主回复完成，否则当前情绪态不能影响当前响应。
+3. P1 输出是 `SYSTEM_DERIVED` 控制状态，不得提升为用户观察事实。
+4. 每个 query event 只能有一条 immutable `perception_snapshots` 记录。
+5. 主 prompt 从持久化 perception 重建历史，禁止使用当前时钟重算旧回合。
+6. 模式概率非负且总和为 1；所有 posture 分量限制在 `[0,1]`。
+7. P1 故障不得静默伪造时间或情绪；配置时区与 quiet-hours 在启动边界校验。
+
+实现：`src/ssa/services/perception_service.py`、
+`src/ssa/domain/perception.py`、`src/ssa/storage/perception_repository.py`；
+组件测试：`tests/component/test_perception.py` 与
+`tests/component/test_interactive_session.py`。
 
 ---
 
@@ -1151,6 +1402,7 @@ class OrganismState(BaseModel):
     arousal: float
     updated_at_ms: int
 
+
 class StateEngine(Protocol):
     def preview(
         self,
@@ -1167,6 +1419,8 @@ class StateEngine(Protocol):
 ```
 
 `valence` 范围为 `[-1, 1]`，其他数值范围为 `[0, 1]`。需要值越大表示当前需要越未满足。
+其中 `energy` 是历史 API 中的无量纲行为容量代理，不是 HDSC-H1 的激活质量、
+热力学内能或焦耳；新研究文档中不得把这两个量混写。
 
 ### 17.2 更新顺序
 
@@ -1484,9 +1738,15 @@ class AgentDraft(BaseModel):
 - purpose。
 - provider/model。
 - temperature。
+- top_p，且与 temperature 二选一。
+- thinking mode 与 reasoning effort。
 - timeout。
 - retry count。
+- 标准/Beta endpoint。
+- user_id 隔离标识。
 - JSON schema。
+- tools、tool_choice 与 strict 模式。
+- logprobs/top_logprobs。
 - prompt version。
 - token limit。
 
@@ -1516,6 +1776,7 @@ class AgentTurnResult(BaseModel):
     new_relationship_version: int
     memory_write_summary: dict[str, int]
     outbox_id: str
+
 
 async def process_signal(signal: IncomingSignal) -> AgentTurnResult: ...
 ```
@@ -1641,14 +1902,14 @@ candidate -> approved -> queued -> sent
 第一入口先实现 CLI，用于快速回放和诊断：
 
 ```text
-ssa chat
-ssa inspect event EVENT_ID
-ssa inspect memory MEMORY_ID
-ssa inspect state
-ssa inspect goals
-ssa replay CORRELATION_ID
-ssa export PATH
-ssa doctor
+hdsc chat
+hdsc inspect event EVENT_ID
+hdsc inspect memory MEMORY_ID
+hdsc inspect state
+hdsc inspect goals
+hdsc replay CORRELATION_ID
+hdsc export PATH
+hdsc doctor
 ```
 
 CLI 只调用应用 Service，不直接访问数据库内部表。
@@ -1898,8 +2159,8 @@ B5 B4 + goals/lifecycle/initiative
 1. `uv sync`。
 2. 复制 `.env.example` 为 `.env` 并填写秘密。
 3. `uv run python scripts/init_db.py`。
-4. `uv run ssa doctor`。
-5. `uv run ssa chat` 完成本地 smoke test。
+4. `uv run hdsc doctor`。
+5. `uv run hdsc tui` 完成本地 smoke test。
 6. 启动 Telegram polling。
 7. 启动 scheduler worker。
 8. 检查 health、outbox 和预算。
@@ -1909,8 +2170,8 @@ B5 B4 + goals/lifecycle/initiative
 Linux 长期设备使用 systemd 管理两个进程：
 
 ```text
-ssa-app.service       接口与 turn orchestrator
-ssa-worker.service    scheduler、jobs、outbox
+hdsc-app.service       接口与 turn orchestrator
+hdsc-worker.service    scheduler、jobs、outbox
 ```
 
 两个进程共享 SQLite 时只允许短事务，并监控 lock retry。第一版也可合并为单进程，待稳定后拆分。

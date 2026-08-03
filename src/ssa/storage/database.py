@@ -18,6 +18,7 @@ open while waiting on LLM or embedding calls.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,6 +28,12 @@ from typing import Protocol
 
 from ssa.config import DatabaseConfig
 from ssa.domain.events import Event
+
+_ADD_COLUMN_RE = re.compile(
+    r"^ALTER\s+TABLE\s+(?P<table>[A-Za-z_][A-Za-z0-9_]*)\s+"
+    r"ADD\s+COLUMN\s+(?P<column>[A-Za-z_][A-Za-z0-9_]*)\b",
+    re.IGNORECASE,
+)
 
 
 class MigrationError(RuntimeError):
@@ -78,6 +85,8 @@ class Database:
 
         Idempotent: safe to call on every startup.
         """
+        self._vec_available = False
+        self._vec_table_pending = False
         db_path = self.path
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -118,9 +127,7 @@ class Database:
 
     @property
     def schema_version(self) -> int:
-        row = self.connection.execute(
-            "SELECT MAX(version) as v FROM schema_migrations"
-        ).fetchone()
+        row = self.connection.execute("SELECT MAX(version) as v FROM schema_migrations").fetchone()
         return int(row["v"]) if row and row["v"] is not None else 0
 
     # ------------------------------------------------------------------
@@ -163,9 +170,9 @@ class Database:
         if the extension is not loaded. The caller can check
         `self.vec_extension_loaded` to determine vector availability.
         """
-        migrations_dir = Path(__file__).resolve().parent.parent.parent.parent / "migrations"
-        if not migrations_dir.exists():
-            return  # no migrations directory — nothing to do
+        migrations_dir = _migration_directory()
+        if migrations_dir is None:
+            raise MigrationError("Migration resources are missing from the installation")
 
         migration_files = sorted(
             migrations_dir.glob("*.sql"),
@@ -199,6 +206,8 @@ class Database:
 
             conn.execute("BEGIN IMMEDIATE")
             try:
+                executed_statement = False
+                deferred_vec_statement = False
                 for stmt in statements:
                     stmt_stripped = stmt.strip()
                     if not stmt_stripped:
@@ -206,8 +215,20 @@ class Database:
                     # Skip vec0 virtual table creation if extension not loaded.
                     if "USING vec0" in stmt_stripped and not self._vec_available:
                         self._vec_table_pending = True
+                        deferred_vec_statement = True
                         continue
-                    conn.execute(stmt)
+                    try:
+                        conn.execute(stmt)
+                    except sqlite3.OperationalError as exc:
+                        if not self._is_satisfied_add_column(conn, stmt_stripped, exc):
+                            raise
+                    executed_statement = True
+
+                # A migration containing only deferred vec0 DDL stays pending
+                # so a later startup can retry it after the extension loads.
+                if deferred_vec_statement and not executed_statement:
+                    conn.execute("COMMIT")
+                    continue
                 conn.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                     (version, name, now),
@@ -215,16 +236,46 @@ class Database:
                 conn.execute("COMMIT")
             except Exception as exc:
                 conn.execute("ROLLBACK")
-                raise MigrationError(
-                    f"Migration {name} failed: {exc}"
-                ) from exc
+                raise MigrationError(f"Migration {name} failed: {exc}") from exc
 
             applied.add(version)
+
+    @staticmethod
+    def _is_satisfied_add_column(
+        conn: sqlite3.Connection,
+        statement: str,
+        error: sqlite3.OperationalError,
+    ) -> bool:
+        """Treat an already-present ADD COLUMN as an idempotent upgrade.
+
+        Migration 006 repairs databases created while migration 002 briefly
+        contained vec_rowid. Those databases already have the column, while
+        older phase-1 databases need it added. Only this narrowly verified
+        duplicate-column case is ignored; every other SQL error is raised.
+        """
+        if "duplicate column name" not in str(error).lower():
+            return False
+        match = _ADD_COLUMN_RE.match(statement)
+        if match is None:
+            return False
+        table = match.group("table")
+        column = match.group("column")
+        rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        return any(str(row["name"]).lower() == column.lower() for row in rows)
 
     @property
     def vec_extension_loaded(self) -> bool:
         """Whether the sqlite-vec extension is available."""
         return self._vec_available and not self._vec_table_pending
+
+
+def _migration_directory() -> Path | None:
+    module_path = Path(__file__).resolve()
+    candidates = (
+        module_path.parent.parent / "migrations",
+        module_path.parent.parent.parent.parent / "migrations",
+    )
+    return next((candidate for candidate in candidates if candidate.is_dir()), None)
 
 
 class EventRepository(Protocol):
@@ -324,4 +375,3 @@ def _find_comment_start(line: str, in_string: bool) -> int:
             return i
         i += 1
     return -1
-

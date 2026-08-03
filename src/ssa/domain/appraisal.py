@@ -8,7 +8,7 @@ Pipeline §16 (M07):
 
 from __future__ import annotations
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class AppraisalResult(BaseModel):
@@ -25,13 +25,21 @@ class AppraisalResult(BaseModel):
     urgency: float
     valence_signal: float  # [-1, 1]
     arousal_signal: float
-    supported_event_ids: list[str] = []
-    supported_memory_ids: list[str] = []
+    supported_event_ids: list[str] = Field(default_factory=list)
+    supported_memory_ids: list[str] = Field(default_factory=list)
     explanation: str = ""
 
-    @field_validator("novelty", "controllability", "certainty", "self_agency",
-                     "user_agency", "external_agency", "relationship_relevance",
-                     "urgency", "arousal_signal")
+    @field_validator(
+        "novelty",
+        "controllability",
+        "certainty",
+        "self_agency",
+        "user_agency",
+        "external_agency",
+        "relationship_relevance",
+        "urgency",
+        "arousal_signal",
+    )
     @classmethod
     def _check_0_1(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
@@ -70,4 +78,17 @@ class AppraisalResult(BaseModel):
         )
 
 
-__all__ = ["AppraisalResult"]
+class StoredAppraisal(BaseModel):
+    """Persisted appraisal record with audit metadata."""
+
+    id: str
+    correlation_id: str
+    cause_event_id: str
+    result: AppraisalResult
+    provider: str
+    model: str
+    prompt_version: str
+    created_at_ms: int
+
+
+__all__ = ["AppraisalResult", "StoredAppraisal"]

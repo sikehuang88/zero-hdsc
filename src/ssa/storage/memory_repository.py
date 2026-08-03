@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from typing import Any
 
 from ssa.domain.enums import MemoryType, SourceKind
@@ -66,10 +67,34 @@ class SqliteMemoryRepository:
             )
         return memory
 
+    def insert_bundle(
+        self,
+        memory: Memory,
+        embedding_bytes: bytes,
+        evidence_event_ids: list[str],
+        links: list[tuple[str, str, float, int]],
+    ) -> Memory:
+        """Atomically persist one memory with its evidence and semantic links."""
+        if not evidence_event_ids:
+            raise ValueError("memory persistence requires evidence")
+        missing = [
+            event_id
+            for event_id in evidence_event_ids
+            if self._conn.execute("SELECT 1 FROM events WHERE id = ?", (event_id,)).fetchone()
+            is None
+        ]
+        if missing:
+            raise ValueError(f"unknown memory evidence events: {missing}")
+        with self._write_savepoint():
+            self.insert(memory, embedding_bytes)
+            for event_id in evidence_event_ids:
+                self.add_evidence(memory.id, event_id, "supports")
+            for target_id, link_type, weight, now_ms in links:
+                self.add_link(memory.id, target_id, link_type, weight, now_ms)
+        return memory
+
     def get(self, memory_id: str) -> Memory | None:
-        row = self._conn.execute(
-            "SELECT * FROM memories WHERE id = ?", (memory_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         if row is None:
             return None
         return self._row_to_memory(row)
@@ -121,9 +146,7 @@ class SqliteMemoryRepository:
             results.append((mem, similarity))
         return results
 
-    def add_evidence(
-        self, memory_id: str, event_id: str, relation: str = "supports"
-    ) -> None:
+    def add_evidence(self, memory_id: str, event_id: str, relation: str = "supports") -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO memory_evidence (memory_id, event_id, relation) "
             "VALUES (?, ?, ?)",
@@ -185,11 +208,28 @@ class SqliteMemoryRepository:
         return int(row["c"]) if row else 0
 
     def all_active(self, limit: int = 100) -> list[Memory]:
-        """Return all active memories (for testing/debugging)."""
+        """Return active memories from most recently updated to oldest."""
         rows = self._conn.execute(
-            "SELECT * FROM memories WHERE status = 'active' LIMIT ?", (limit,)
+            """
+            SELECT * FROM memories
+            WHERE status = 'active'
+            ORDER BY updated_at_ms DESC, rowid DESC
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
         return [self._row_to_memory(r) for r in rows]
+
+    @contextmanager
+    def _write_savepoint(self) -> Iterator[None]:
+        self._conn.execute("SAVEPOINT memory_bundle_write")
+        try:
+            yield
+            self._conn.execute("RELEASE SAVEPOINT memory_bundle_write")
+        except Exception:
+            self._conn.execute("ROLLBACK TO SAVEPOINT memory_bundle_write")
+            self._conn.execute("RELEASE SAVEPOINT memory_bundle_write")
+            raise
 
     @staticmethod
     def _row_to_memory(row: sqlite3.Row | dict[str, Any]) -> Memory:
