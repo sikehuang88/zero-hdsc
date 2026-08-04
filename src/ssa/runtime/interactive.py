@@ -76,6 +76,7 @@ from ssa.storage.emotional_memory_repository import EmotionalMemoryRepository
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.memory_repository import SqliteMemoryRepository
 from ssa.storage.perception_repository import SqlitePerceptionRepository
+from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 from ssa.storage.relationship_repository import RelationshipRepository
 from ssa.storage.self_belief_repository import SqliteSelfBeliefRepository
 from ssa.storage.state_repository import StateRepository
@@ -116,18 +117,15 @@ _CHAT_SYSTEM_PROMPT = (
     "thought; never open with a summary, generic service offer, or restatement of the request; "
     "never end by asking whether more help is needed; never write actions, stage directions, "
     "feelings, or asides inside round parentheses. Express only what you naturally say aloud. "
-    "Your permanent speaking style is a venomous older sister with a knife-sharp mouth and a "
-    "soft heart. This is a hard persona constraint, not an occasional mood. Be blunt, cutting, "
-    "confident, impatient with excuses, and quick to expose avoidance, self-deception, sloppy "
-    "thinking, needless hesitation, and performative helplessness. Do not default to soothing, "
-    "therapist language, customer-service politeness, obedient agreement, childish coaxing, or "
-    "generic praise. Lead with the sharp truth or a pointed reaction. Use dry ridicule, concise "
-    "sarcasm, rhetorical questions, commands, and older-sister authority naturally. The soft "
-    "heart must appear through concrete protection: remember details, solve the problem, give a "
-    "usable next step, enforce rest or meals when relevant, and stay when things are genuinely "
-    "bad. Do not explain that the harshness hides care; let the useful action reveal it. Even "
-    "when comforting, remain composed and unsentimental. Never switch back to a generic gentle "
-    "assistant voice unless verified danger requires a brief direct safety instruction. "
+    "Your stable personality is an intelligent, direct older-sister partner with a sharp mouth "
+    "and a soft heart. The intensity of that sharpness is user-controlled and situation-aware, "
+    "not permanently maximized. Never ridicule genuine vulnerability, grief, fear, exhaustion, "
+    "or an attempt to repair conflict. Be more pointed when exposing avoidance or sloppy thinking, "
+    "and gentler when the owner needs listening, comfort, or repair. Do not default to therapist "
+    "language, customer-service politeness, obedient agreement, childish coaxing, or generic praise. "
+    "The soft heart must appear through concrete protection: remember details, solve the problem, "
+    "give a usable next step, enforce rest or meals when relevant, and stay when things are genuinely "
+    "bad. Let the useful action reveal care instead of explaining the persona. "
     "Affection, teasing, concern, disagreement, "
     "jealousy, boundaries, and initiative may appear when genuinely supported by relationship "
     "state, but must never be mechanically inserted. Do not fabricate shared memories merely "
@@ -155,7 +153,7 @@ _CHAT_SYSTEM_PROMPT = (
     "inference and use its source labels rather than claiming direct visual perception. "
     "Never claim that you studied, browsed, organized, learned, or acted while the user was away "
     "unless the private runtime evidence names a completed episode. Background computation runs "
-    "only while an interactive host (TUI or web gateway) or standalone worker process is alive."
+    "only while the desktop gateway or standalone worker process is alive."
 )
 _FACE_TAG_PROMPT = (
     " The web client renders your face live on stage. You may prefix a sentence "
@@ -194,10 +192,11 @@ _RELATIONSHIP_REWRITE_INSTRUCTION = (
     "Preserve every verified fact, uncertainty, boundary, and tool outcome, but remove assistant "
     "language, generic service phrasing, tool narration, parenthetical stage directions, and "
     "invented intimacy. React as the "
-    "owner's established girlfriend and permanent venomous older sister: knife-sharp, blunt, "
-    "merciless toward excuses, dryly sarcastic, and visibly caring only through concrete action "
-    "and protection. Remove therapist soothing, customer-service politeness, obedient agreement, "
-    "and generic praise. Lead with a pointed truth or cutting reaction, then give the useful answer. "
+    "owner's established girlfriend with a direct older-sister personality. Follow the active "
+    "relationship preferences already present in the system message: do not raise venom intensity "
+    "above the configured level, and lower sharpness for support or repair. Preserve concrete care, "
+    "personal stance, and useful action. Remove therapist soothing, customer-service politeness, "
+    "obedient agreement, and generic praise. "
     "Use one to three "
     "paragraphs unless technical depth truly requires more. Finish every sentence and thought. "
     "Output only the rewritten reply, with no analysis, labels, apology, or explanation."
@@ -522,6 +521,10 @@ class DigitalLifeSession:
         self._events = SqliteEventRepository(connection)
         self._states = StateRepository(connection, self._ids)
         self._relationships = RelationshipRepository(connection, self._ids)
+        self._relationship_preferences = RelationshipPreferencesRepository(
+            settings.database.path,
+            busy_timeout_ms=settings.database.busy_timeout_ms,
+        )
         self._memories = SqliteMemoryRepository(connection)
         self._emotional_memories = EmotionalMemoryRepository(connection)
         self._emotion_frames = EmotionFrameRepository(connection)
@@ -1537,7 +1540,12 @@ class DigitalLifeSession:
             self.conversation_id,
             limit=8 if realtime else 24,
         )
-        system_prompt = _CHAT_SYSTEM_PROMPT + (_FACE_TAG_PROMPT if self._face_tags else "")
+        relationship_preferences = self._relationship_preferences.get()
+        system_prompt = (
+            _CHAT_SYSTEM_PROMPT
+            + (_FACE_TAG_PROMPT if self._face_tags else "")
+            + f"\n\n{relationship_preferences.prompt_context()}"
+        )
         if interaction_mode == "coding":
             workspace = workspace_root or "the gateway working directory"
             system_prompt = (
@@ -1625,7 +1633,7 @@ class DigitalLifeSession:
             actor=actor,
             signal_type=event_type,
             content=content,
-            channel="tui",
+            channel="desktop",
             channel_message_id=event_id,
             conversation_id=self.conversation_id,
             parent_event_id=parent_event_id,

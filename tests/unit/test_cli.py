@@ -57,22 +57,6 @@ def test_cli_init_and_doctor(
     assert f"Win32 tools: {expected_win32} (clipboard=on)" in output
 
 
-def test_cli_launches_tui_with_conversation_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    def launch(settings: Settings, conversation_id: str) -> int:
-        captured["settings"] = settings
-        captured["conversation_id"] = conversation_id
-        return 0
-
-    monkeypatch.setattr("ssa.interfaces.cli._launch_tui", launch)
-
-    assert main(["tui", "--conversation", "workbench"]) == 0
-    assert captured["conversation_id"] == "workbench"
-
-
 def test_cli_launches_one_shot_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

@@ -16,8 +16,11 @@ from ssa.adapters.doubao_tts import DoubaoSeedTTSAdapter
 from ssa.adapters.doubao_tts_protocol import EventType, Message, MsgType
 from ssa.interfaces.web_gateway import (
     PresentationTagStripper,
+    SpeechSegment,
     SpeechSegmenter,
     VoiceExpressionCue,
+    _doubao_voice_controls,
+    _fish_voice_controls,
     _voice_context_texts,
     _voice_style_schedule,
 )
@@ -181,12 +184,61 @@ def test_voice_context_exposes_micro_acoustics_and_semantic_emphasis() -> None:
         }
     )[0]
 
-    context = " ".join(_voice_context_texts(style, ()))
+    contexts = _voice_context_texts(style, ())
+    context = contexts[0]
 
+    assert len(contexts) == 1
     assert "不规则颤动和短暂破音" in context
     assert "音高稳定度约 0.34" in context
     assert "句前停顿目标约 260 毫秒" in context
     assert "真走、别丢下我" in context
+
+
+def test_provider_voice_controls_are_bounded_and_preserve_voice_identity() -> None:
+    quiet = _voice_style_schedule(
+        {
+            "primary": {"name": "hurt", "intensity": 0.9},
+            "voice_segments": [
+                {
+                    "recipe": "hurt_composed",
+                    "intensity": 0.9,
+                    "rate": 0.72,
+                    "energy": 0.0,
+                    "tremor": 0.8,
+                }
+            ],
+        }
+    )[0]
+    energetic = _voice_style_schedule(
+        {
+            "primary": {"name": "hurt", "intensity": 0.7},
+            "voice_segments": [
+                {
+                    "recipe": "tender_ache",
+                    "intensity": 0.7,
+                    "rate": 1.18,
+                    "energy": 1.0,
+                    "tremor": 0.2,
+                }
+            ],
+        }
+    )[0]
+
+    doubao = _doubao_voice_controls(quiet)
+    fish = _fish_voice_controls(
+        [
+            SpeechSegment("短句", quiet),
+            SpeechSegment("这是一条明显更长的句子", energetic),
+        ]
+    )
+
+    assert doubao is not None
+    assert doubao.speech_rate == -28
+    assert doubao.loudness_rate == -18
+    assert 0.92 <= fish.speed <= 1.06
+    assert -2.5 <= fish.volume <= 2.0
+    assert 0.55 <= fish.temperature <= 0.76
+    assert 0.62 <= fish.top_p <= 0.78
 
 
 class _RecordingDoubaoAdapter(DoubaoSeedTTSAdapter):
@@ -194,6 +246,7 @@ class _RecordingDoubaoAdapter(DoubaoSeedTTSAdapter):
         super().__init__(
             api_key="test-api-key",
             send_interval_ms=0,
+            section_id="emotion-turn",
             context_texts=("默认近距离自然交谈",),
         )
         self._websocket = object()
@@ -238,7 +291,12 @@ async def test_stream_segments_overrides_context_per_session_without_mutating_de
         event
         async for event in adapter.stream_segments(
             _texts("第一段"),
-            context_texts=("温柔、克制、隐约难过",),
+            context_texts=("温柔、克制", "隐约难过"),
+            speech_rate=-16,
+            loudness_rate=-4,
+            emotion="sad",
+            emotion_scale=3,
+            pitch=-1,
         )
     ]
     second_events = [event async for event in adapter.stream_segments(_texts("第二段"))]
@@ -254,5 +312,18 @@ async def test_stream_segments_overrides_context_per_session_without_mutating_de
     assert sum(event.finished for event in second_events) == 1
     assert len(start_messages) == 2
     assert start_messages[0].session_id != start_messages[1].session_id
-    assert start_payloads[0]["req_params"]["context_texts"] == ["温柔、克制、隐约难过"]
-    assert start_payloads[1]["req_params"]["context_texts"] == ["默认近距离自然交谈"]
+    first_params = start_payloads[0]["req_params"]
+    second_params = start_payloads[1]["req_params"]
+    first_additions = json.loads(first_params["additions"])
+    second_additions = json.loads(second_params["additions"])
+
+    assert first_params["audio_params"]["speech_rate"] == -16
+    assert first_params["audio_params"]["loudness_rate"] == -4
+    assert first_params["audio_params"]["emotion"] == "sad"
+    assert first_params["audio_params"]["emotion_scale"] == 3
+    assert first_additions["context_texts"] == ["温柔、克制。隐约难过"]
+    assert first_additions["section_id"] == "emotion-turn"
+    assert first_additions["post_process"] == {"pitch": -1}
+    assert second_additions["context_texts"] == ["默认近距离自然交谈"]
+    assert "speech_rate" not in second_params["audio_params"]
+    assert "loudness_rate" not in second_params["audio_params"]

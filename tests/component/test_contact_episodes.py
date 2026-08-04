@@ -11,9 +11,11 @@ from ssa.config import DatabaseConfig, InitiativeConfig, Settings
 from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import IncomingSignal, normalize_signal
 from ssa.domain.lifecycle import ContactPhase, ContactStatus, Initiative, InitiativeStatus
+from ssa.domain.relationship_preferences import RelationshipPreferences
 from ssa.ids import SequentialIdGenerator
 from ssa.services.contact_episode_service import ContactEpisodeService
 from ssa.services.outbox_service import OutboxDeliveryService
+from ssa.services.proactive_contact_policy import ProactiveContactPolicy
 from ssa.storage.database import Database
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.lifecycle_repository import (
@@ -21,6 +23,7 @@ from ssa.storage.lifecycle_repository import (
     InitiativeRepository,
     OutboxRepository,
 )
+from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 
 
 def _setup(
@@ -44,6 +47,20 @@ def _setup(
     initiatives = InitiativeRepository(database.connection)
     outbox = OutboxRepository(database.connection)
     events = SqliteEventRepository(database.connection)
+    preferences = RelationshipPreferencesRepository(str(database.path))
+    preferences.save(RelationshipPreferences(quiet_hours_enabled=False))
+    initiative_config = InitiativeConfig(
+        daily_limit=8,
+        cooldown_minutes=1,
+        quiet_hours_start="00:00",
+        quiet_hours_end="00:00",
+        min_gap_hours=0,
+    )
+    proactive_policy = ProactiveContactPolicy(
+        preferences=preferences,
+        config=initiative_config,
+        timezone="UTC",
+    )
     contact_service = ContactEpisodeService(
         contacts=contacts,
         initiatives=initiatives,
@@ -51,14 +68,8 @@ def _setup(
         events=events,
         clock=clock,
         ids=ids,
-        config=InitiativeConfig(
-            daily_limit=8,
-            cooldown_minutes=1,
-            quiet_hours_start="00:00",
-            quiet_hours_end="00:00",
-            min_gap_hours=0,
-        ),
         timezone="UTC",
+        proactive_policy=proactive_policy,
         wait_hours=1,
         max_messages=3,
     )
@@ -68,6 +79,7 @@ def _setup(
         events=events,
         clock=clock,
         ids=ids,
+        proactive_policy=proactive_policy,
         on_delivered=contact_service.on_delivered,
     )
     return database, clock, ids, contact_service, delivery, contacts, initiatives, events
@@ -150,6 +162,30 @@ async def test_silence_followups_are_bounded_and_withdraw(tmp_path: Path) -> Non
         assert current.phase == ContactPhase.WITHDRAWAL
         assert current.status == ContactStatus.CANCELLED
         assert current.message_count == 3
+    finally:
+        database.close()
+
+
+def test_disabled_preference_blocks_silence_follow_up(tmp_path: Path) -> None:
+    database, clock, ids, service, _delivery, contacts, initiatives, events = _setup(tmp_path)
+    try:
+        initiative = _opening(clock, ids, initiatives)
+        episode = service.on_delivered(initiative, _delivery_event(clock, ids, events, initiative))
+        RelationshipPreferencesRepository(str(database.path)).save(
+            RelationshipPreferences(
+                proactive_frequency="off",
+                quiet_hours_enabled=False,
+            )
+        )
+        clock.advance_ms(2 * 3_600_000)
+
+        result = service.evaluate_due("conversation-1")
+
+        assert result.follow_ups_queued == 0
+        current = contacts.get(episode.id)
+        assert current is not None
+        assert current.message_count == 1
+        assert current.phase == ContactPhase.WAITING
     finally:
         database.close()
 

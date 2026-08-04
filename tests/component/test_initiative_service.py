@@ -14,9 +14,11 @@ from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import IncomingSignal, normalize_signal
 from ssa.domain.lifecycle import EmotionEpisode, EmotionType, Initiative, InitiativeStatus
 from ssa.domain.relationship import RelationshipState
+from ssa.domain.relationship_preferences import ProactiveFrequency, RelationshipPreferences
 from ssa.domain.state import OrganismState
 from ssa.ids import SequentialIdGenerator
 from ssa.services.initiative_service import InitiativeService
+from ssa.services.proactive_contact_policy import ProactiveContactPolicy
 from ssa.storage.database import Database
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.lifecycle_repository import (
@@ -27,6 +29,7 @@ from ssa.storage.lifecycle_repository import (
     InitiativeRepository,
     OutboxRepository,
 )
+from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 from ssa.storage.trace_repository import SqliteTraceRepository
 
 _NOW_MS = int(datetime(2030, 3, 5, 15, 0, tzinfo=UTC).timestamp() * 1000)
@@ -36,6 +39,7 @@ def _setup(
     tmp_path: Path,
     *,
     initiative_config: InitiativeConfig | None = None,
+    relationship_preferences: RelationshipPreferences | None = None,
     llm: FakeLLMAdapter | None = None,
 ) -> tuple[
     Database,
@@ -60,6 +64,14 @@ def _setup(
     initiatives = InitiativeRepository(database.connection)
     outbox = OutboxRepository(database.connection)
     usage = BackgroundUsageRepository(database.connection)
+    preferences = RelationshipPreferencesRepository(str(database.path))
+    if relationship_preferences is not None:
+        preferences.save(relationship_preferences)
+    proactive_policy = ProactiveContactPolicy(
+        preferences=preferences,
+        config=settings.initiative,
+        timezone="UTC",
+    )
     service = InitiativeService(
         initiatives=initiatives,
         outbox=outbox,
@@ -76,6 +88,7 @@ def _setup(
         goal_config=settings.goal,
         llm_config=settings.llm,
         timezone="UTC",
+        proactive_policy=proactive_policy,
         llm=llm,
     )
     return database, clock, ids, service, events, initiatives, outbox, usage
@@ -175,10 +188,13 @@ async def test_approved_candidate_keeps_evidence_and_enqueues_once(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_quiet_hours_reject_before_llm_or_persistence(tmp_path: Path) -> None:
     llm = FakeLLMAdapter()
-    config = InitiativeConfig(quiet_hours_start="00:00", quiet_hours_end="23:59")
     database, clock, ids, service, events, initiatives, _outbox, usage = _setup(
         tmp_path,
-        initiative_config=config,
+        relationship_preferences=RelationshipPreferences(
+            quiet_hours_enabled=True,
+            quiet_hours_start="00:00",
+            quiet_hours_end="23:59",
+        ),
         llm=llm,
     )
     try:
@@ -186,6 +202,28 @@ async def test_quiet_hours_reject_before_llm_or_persistence(tmp_path: Path) -> N
         decision = await service.evaluate("conversation-1", *_states(clock))
 
         assert decision.gate == "quiet_hours"
+        assert initiatives.list_active("conversation-1") == []
+        assert llm.call_count == 0
+        assert usage.used("2030-03-05") == 0
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_preference_blocks_proactive_generation(tmp_path: Path) -> None:
+    llm = FakeLLMAdapter()
+    database, clock, _ids, service, _events, initiatives, _outbox, usage = _setup(
+        tmp_path,
+        relationship_preferences=RelationshipPreferences(
+            proactive_frequency=ProactiveFrequency.OFF,
+            quiet_hours_enabled=False,
+        ),
+        llm=llm,
+    )
+    try:
+        decision = await service.evaluate("conversation-1", *_states(clock))
+
+        assert decision.gate == "proactive_disabled"
         assert initiatives.list_active("conversation-1") == []
         assert llm.call_count == 0
         assert usage.used("2030-03-05") == 0

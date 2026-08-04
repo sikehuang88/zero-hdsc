@@ -16,7 +16,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any, Literal
 
@@ -41,6 +41,8 @@ from ssa.adapters.frontend_llm import build_frontend_llm_adapter
 from ssa.config import DatabaseConfig, Settings, load_settings
 from ssa.domain.events import Event
 from ssa.interfaces.coding_workspace_api import coding_workspace_router
+from ssa.interfaces.community_api import community_router
+from ssa.interfaces.relationship_preferences_api import relationship_preferences_router
 from ssa.runtime.interactive import (
     DigitalLifeSession,
     SessionStreamEvent,
@@ -199,7 +201,6 @@ _VOICE_RECIPES: dict[str, VoiceRecipe] = {
 _DEFAULT_VOICE_RECIPE = "venomous_sister"
 _MIN_VOICE_RATE = 0.72
 _MAX_VOICE_RATE = 1.18
-_FISH_VOICE_IDENTITY_SPEED = 1.0
 
 
 class _LifecycleEventBuffer:
@@ -243,6 +244,8 @@ async def _run_lifecycle_pump(
         except Exception:
             logger.exception("background lifecycle tick failed")
         await asyncio.sleep(poll_seconds)
+
+
 _PRESENTATION_TAG_BODY_RE = re.compile(
     r"\s*(?:[:=]\s*[a-z0-9_]*(?:\s*\|\s*[0-9.]*){0,2}\s*)?",
     re.IGNORECASE,
@@ -283,6 +286,20 @@ class VoiceStyle:
 class SpeechSegment:
     text: str
     style: VoiceStyle | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class FishVoiceControls:
+    speed: float = 1.0
+    volume: float = 0.0
+    temperature: float = 0.7
+    top_p: float = 0.7
+
+
+@dataclasses.dataclass(frozen=True)
+class DoubaoVoiceControls:
+    speech_rate: int
+    loudness_rate: int
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -525,7 +542,8 @@ def _voice_context_texts(
     fallback: Sequence[str],
 ) -> tuple[str, ...]:
     if style is None:
-        return tuple(text.strip() for text in fallback if text.strip())[:4]
+        combined = "。".join(text.strip() for text in fallback if text.strip())
+        return (combined,) if combined else ()
     recipe = _VOICE_RECIPES.get(style.recipe, _VOICE_RECIPES[_DEFAULT_VOICE_RECIPE])
     if style.intensity < 0.35:
         intensity_instruction = "情绪只轻轻显露"
@@ -563,11 +581,48 @@ def _voice_context_texts(
         else "重音跟随句义自然变化，不做固定节拍强调。"
     )
     return (
-        f"本段声音表达：{recipe.instruction}；{intensity_instruction}；{rate_instruction}。",
-        f"声音细节：{breath_instruction}；{tremor_instruction}；{energy_instruction}；"
-        f"音高稳定度约 {style.pitch_stability:.2f}，句尾方式为 {style.ending}。",
-        f"句前停顿目标约 {style.pause_before_ms} 毫秒。{emphasis_instruction}保持与前后片段完全相同的"
-        "说话人音色、音量距离和口腔质感，避免重新起调。",
+        f"本段声音表达：{recipe.instruction}；{intensity_instruction}；{rate_instruction}；"
+        f"{breath_instruction}；{tremor_instruction}；{energy_instruction}；"
+        f"音高稳定度约 {style.pitch_stability:.2f}，句尾方式为 {style.ending}；"
+        f"句前停顿目标约 {style.pause_before_ms} 毫秒。{emphasis_instruction}"
+        "保持与前后片段完全相同的说话人音色、音量距离和口腔质感，避免重新起调。",
+    )
+
+
+def _doubao_voice_controls(style: VoiceStyle | None) -> DoubaoVoiceControls | None:
+    if style is None:
+        return None
+    return DoubaoVoiceControls(
+        speech_rate=round(_clamp((style.rate - 1.0) * 100.0, -28.0, 24.0)),
+        loudness_rate=round(_clamp((style.energy - 0.5) * 36.0, -18.0, 16.0)),
+    )
+
+
+def _fish_voice_controls(segments: Sequence[SpeechSegment]) -> FishVoiceControls:
+    styled = [segment for segment in segments if segment.style is not None]
+    if not styled:
+        return FishVoiceControls()
+    total_weight = sum(max(1, len(segment.text.strip())) for segment in styled)
+
+    def average(value_of: Callable[[VoiceStyle], float]) -> float:
+        return (
+            sum(
+                value_of(segment.style) * max(1, len(segment.text.strip()))
+                for segment in styled
+                if segment.style is not None
+            )
+            / total_weight
+        )
+
+    rate = average(lambda style: style.rate)
+    energy = average(lambda style: style.energy)
+    intensity = average(lambda style: style.intensity)
+    tremor = average(lambda style: style.tremor)
+    return FishVoiceControls(
+        speed=_clamp(rate, 0.92, 1.06),
+        volume=_clamp((energy - 0.5) * 5.0, -2.5, 2.0),
+        temperature=_clamp(0.56 + intensity * 0.16 + tremor * 0.05, 0.55, 0.76),
+        top_p=_clamp(0.62 + energy * 0.16, 0.62, 0.78),
     )
 
 
@@ -653,7 +708,7 @@ def _log_tts_trace(event: str, **fields: Any) -> None:
 def create_app(
     settings: Settings,
     *,
-    conversation_id: str = "web-primary",
+    conversation_id: str = "cli-primary",
     face_tags: bool = True,
 ) -> FastAPI:
     """Build the ASGI app around a single lazily-initialized session."""
@@ -692,6 +747,18 @@ def create_app(
 
     app = FastAPI(title="hdsc-web-gateway", lifespan=lifespan)
     app.include_router(coding_workspace_router())
+    app.include_router(
+        community_router(
+            settings.database.path,
+            busy_timeout_ms=settings.database.busy_timeout_ms,
+        )
+    )
+    app.include_router(
+        relationship_preferences_router(
+            settings.database.path,
+            busy_timeout_ms=settings.database.busy_timeout_ms,
+        )
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(_DEV_ORIGINS),
@@ -923,6 +990,7 @@ def create_app(
                 default_context_texts=voice_route.context_texts,
             )
             try:
+                adapter: FishAudioTTSAdapter | DoubaoSeedTTSAdapter
                 if voice_route.adapter == "fish-audio-tts":
                     adapter = FishAudioTTSAdapter(
                         api_key=(
@@ -957,6 +1025,7 @@ def create_app(
                         context_texts=tuple(voice_route.context_texts),
                     )
                 if voice_route.adapter == "fish-audio-tts":
+                    assert isinstance(adapter, FishAudioTTSAdapter)
                     collected_segments: list[SpeechSegment] = []
                     while True:
                         segment = await tts_input.get()
@@ -966,6 +1035,7 @@ def create_app(
                             collected_segments.append(segment)
                     if not collected_segments:
                         raise ValueError("Fish Audio TTS text must not be empty")
+                    fish_controls = _fish_voice_controls(collected_segments)
                     session_count = 1
                     session_chunks = 0
                     session_audio_bytes = 0
@@ -976,14 +1046,20 @@ def create_app(
                         recipe="continuous_fish_voice",
                         model=voice_route.model,
                         speaker=voice_route.speaker,
-                        prosody_speed=_FISH_VOICE_IDENTITY_SPEED,
-                        speed_policy="voice_identity_lock",
+                        prosody_speed=fish_controls.speed,
+                        prosody_volume=fish_controls.volume,
+                        temperature=fish_controls.temperature,
+                        top_p=fish_controls.top_p,
+                        speed_policy="bounded_emotion_average",
                     )
                     _log_tts_trace(
                         "fish_voice_policy",
                         turn_id=tts_turn_id,
-                        speed=_FISH_VOICE_IDENTITY_SPEED,
-                        policy="voice_identity_lock",
+                        speed=fish_controls.speed,
+                        volume=fish_controls.volume,
+                        temperature=fish_controls.temperature,
+                        top_p=fish_controls.top_p,
+                        policy="bounded_emotion_average",
                         model_pacing="emotion_tags_and_punctuation",
                         segments=len(collected_segments),
                         characters=sum(len(item.text.strip()) for item in collected_segments),
@@ -1020,20 +1096,18 @@ def create_app(
 
                     async with adapter:
                         chunk_index = 0
-                        async for stream_event in adapter.stream_styled_segments(
+                        async for fish_event in adapter.stream_styled_segments(
                             fish_segments(),
-                            # Keep generation conservative: emotion lives in sentence tags,
-                            # while stable sampling protects the reference voice identity.
-                            prosody_speed=_FISH_VOICE_IDENTITY_SPEED,
-                            prosody_volume=0.0,
-                            temperature=0.7,
-                            top_p=0.7,
+                            prosody_speed=fish_controls.speed,
+                            prosody_volume=fish_controls.volume,
+                            temperature=fish_controls.temperature,
+                            top_p=fish_controls.top_p,
                         ):
-                            if stream_event.audio:
+                            if fish_event.audio:
                                 chunk_index += 1
                                 session_chunks += 1
-                                session_audio_bytes += len(stream_event.audio)
-                                total_audio_bytes += len(stream_event.audio)
+                                session_audio_bytes += len(fish_event.audio)
+                                total_audio_bytes += len(fish_event.audio)
                                 await queue.put(
                                     (
                                         "stream",
@@ -1044,7 +1118,7 @@ def create_app(
                                             "chunk_index": chunk_index,
                                             "mime": "audio/mpeg",
                                             "audio_base64": base64.b64encode(
-                                                stream_event.audio
+                                                fish_event.audio
                                             ).decode("ascii"),
                                         },
                                     )
@@ -1084,6 +1158,7 @@ def create_app(
                         connection_usage=None,
                     )
                     return
+                assert isinstance(adapter, DoubaoSeedTTSAdapter)
                 async with adapter:
                     chunk_index = 0
                     pending: SpeechSegment | None = None
@@ -1157,48 +1232,30 @@ def create_app(
                             context_texts=session_contexts,
                         )
 
-                        stream_contexts = (
-                            ()
-                            if voice_route.adapter == "fish-audio-tts"
-                            else session_contexts
-                        )
-                        stream_kwargs = {"context_texts": stream_contexts}
-                        if voice_route.adapter == "fish-audio-tts" and style is not None:
-                            if style.pause_before_ms:
-                                await asyncio.sleep(style.pause_before_ms / 1000)
-                            stream_kwargs = {
-                                "prosody_speed": style.rate,
-                                "prosody_volume": (style.energy - 0.5) * 8.0,
-                                "temperature": _clamp(
-                                    0.48 + style.intensity * 0.34 + style.tremor * 0.12,
-                                    0.0,
-                                    1.0,
-                                ),
-                                "top_p": _clamp(
-                                    0.58 + style.energy * 0.24,
-                                    0.0,
-                                    1.0,
-                                ),
-                                "emotion_markup": fish_audio_emotion_markup(
-                                    recipe=style.recipe,
-                                    intensity=style.intensity,
-                                    breathiness=style.breathiness,
-                                    tremor=style.tremor,
-                                    energy=style.energy,
-                                    pause_before_ms=style.pause_before_ms,
-                                    ending=style.ending,
-                                    has_emphasis=bool(style.emphasis),
-                                ),
-                            }
-                        async for stream_event in adapter.stream_segments(
+                        stream_kwargs: dict[str, Any] = {"context_texts": session_contexts}
+                        doubao_controls = _doubao_voice_controls(style)
+                        if doubao_controls is not None:
+                            stream_kwargs.update(
+                                speech_rate=doubao_controls.speech_rate,
+                                loudness_rate=doubao_controls.loudness_rate,
+                            )
+                            _log_tts_trace(
+                                "doubao_voice_controls",
+                                turn_id=tts_turn_id,
+                                session=session_count,
+                                speech_rate=doubao_controls.speech_rate,
+                                loudness_rate=doubao_controls.loudness_rate,
+                                policy="native_bounded_prosody",
+                            )
+                        async for doubao_event in adapter.stream_segments(
                             matching_segments(first_segment, style),
                             **stream_kwargs,
                         ):
-                            if stream_event.audio:
+                            if doubao_event.audio:
                                 chunk_index += 1
                                 session_chunks += 1
-                                session_audio_bytes += len(stream_event.audio)
-                                total_audio_bytes += len(stream_event.audio)
+                                session_audio_bytes += len(doubao_event.audio)
+                                total_audio_bytes += len(doubao_event.audio)
                                 await queue.put(
                                     (
                                         "stream",
@@ -1209,12 +1266,12 @@ def create_app(
                                             "chunk_index": chunk_index,
                                             "mime": "audio/mpeg",
                                             "audio_base64": base64.b64encode(
-                                                stream_event.audio
+                                                doubao_event.audio
                                             ).decode("ascii"),
                                         },
                                     )
                                 )
-                            if stream_event.subtitle is not None:
+                            if doubao_event.subtitle is not None:
                                 await queue.put(
                                     (
                                         "stream",
@@ -1222,14 +1279,14 @@ def create_app(
                                             "kind": "tts_subtitle",
                                             "round_index": 0,
                                             "sequence": session_count,
-                                            "data": stream_event.subtitle,
-                                            "log_id": stream_event.log_id,
+                                            "data": doubao_event.subtitle,
+                                            "log_id": doubao_event.log_id,
                                         },
                                     )
                                 )
-                            if stream_event.finished and stream_event.usage:
-                                session_usage = stream_event.usage
-                                for key, value in stream_event.usage.items():
+                            if doubao_event.finished and doubao_event.usage:
+                                session_usage = doubao_event.usage
+                                for key, value in doubao_event.usage.items():
                                     current_value = aggregate_usage.get(key)
                                     if (
                                         isinstance(value, (int, float))
@@ -1541,9 +1598,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=18787, help="bind port (default: 18787)")
     parser.add_argument(
         "--conversation",
-        default="web-primary",
+        default="cli-primary",
         metavar="ID",
-        help="persistent conversation ID (default: web-primary)",
+        help="persistent conversation ID (default: cli-primary)",
     )
     parser.add_argument(
         "--no-face-tags",

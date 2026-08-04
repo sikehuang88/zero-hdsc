@@ -23,6 +23,7 @@ from ssa.domain.lifecycle import (
 from ssa.domain.relationship import RelationshipState
 from ssa.domain.state import OrganismState
 from ssa.ids import IdGenerator
+from ssa.services.proactive_contact_policy import ProactiveContactPolicy
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.lifecycle_repository import (
     BackgroundUsageRepository,
@@ -67,6 +68,7 @@ class InitiativeService:
         goal_config: GoalConfig,
         llm_config: LLMConfig,
         timezone: str,
+        proactive_policy: ProactiveContactPolicy,
         llm: LLMAdapter | None = None,
     ) -> None:
         self._initiatives = initiatives
@@ -84,6 +86,7 @@ class InitiativeService:
         self._goal_config = goal_config
         self._llm_config = llm_config
         self._timezone = ZoneInfo(timezone)
+        self._proactive_policy = proactive_policy
         self._llm = llm
 
     async def evaluate(
@@ -93,6 +96,10 @@ class InitiativeService:
         relationship: RelationshipState,
     ) -> InitiativeDecision:
         now_ms = self._clock.now_ms()
+        limits = self._proactive_policy.current()
+        preference_gate = self._proactive_policy.gate(now_ms, limits)
+        if preference_gate is not None:
+            return InitiativeDecision(False, preference_gate)
         recent_events = self._events.recent_by_conversation(conversation_id, limit=80)
         self._emotions.expire_decayed(conversation_id, now_ms)
         active_emotions = self._emotions.active(conversation_id)
@@ -107,18 +114,15 @@ class InitiativeService:
 
         if not source_event_ids:
             return InitiativeDecision(False, "missing_evidence")
-        if self._is_quiet(now_ms):
-            return InitiativeDecision(False, "quiet_hours")
-
         day_start_ms = self._local_day_start_ms(now_ms)
         if (
             self._initiatives.count_sent_since(conversation_id, day_start_ms)
-            >= self._config.daily_limit
+            >= limits.daily_limit
         ):
             return InitiativeDecision(False, "daily_limit")
 
         latest_sent = self._initiatives.latest_sent(conversation_id)
-        cooldown_ms = self._config.cooldown_minutes * 60_000
+        cooldown_ms = limits.cooldown_minutes * 60_000
         if latest_sent is not None and now_ms - latest_sent.updated_at_ms < cooldown_ms:
             return InitiativeDecision(False, "cooldown")
 
@@ -126,7 +130,7 @@ class InitiativeService:
         if latest_user is None:
             return InitiativeDecision(False, "no_user_history")
         user_gap_ms = max(0, now_ms - latest_user.created_at_ms)
-        if user_gap_ms < self._config.min_gap_hours * _HOUR_MS:
+        if user_gap_ms < limits.min_gap_hours * _HOUR_MS:
             return InitiativeDecision(False, "minimum_user_gap")
 
         goal, goal_urgency = self._leading_goal(active_goals, organism, now_ms)
@@ -153,6 +157,7 @@ class InitiativeService:
             goal_urgency=goal_urgency,
             user_gap_ms=user_gap_ms,
             active_count=len(self._initiatives.list_active(conversation_id)),
+            min_gap_hours=limits.min_gap_hours,
         )
         decision_score = self._decision_score(components)
         urgency = max(emotion_signal, goal_urgency, organism.connection_need)
@@ -174,6 +179,10 @@ class InitiativeService:
             "thresholds": {
                 "min_urgency": self._config.min_urgency,
                 "min_decision_score": 0.25,
+                "proactive_frequency": limits.frequency.value,
+                "daily_limit": limits.daily_limit,
+                "cooldown_minutes": limits.cooldown_minutes,
+                "min_gap_hours": limits.min_gap_hours,
             },
             "draft_source": draft_source,
             "source_event_ids": source_event_ids,
@@ -329,8 +338,9 @@ class InitiativeService:
         goal_urgency: float,
         user_gap_ms: int,
         active_count: int,
+        min_gap_hours: int,
     ) -> dict[str, float]:
-        gap_floor = max(1, self._config.min_gap_hours * _HOUR_MS)
+        gap_floor = max(1, min_gap_hours * _HOUR_MS)
         return {
             "motive": max(emotion_signal, goal_urgency, organism.connection_need),
             "relevance": max(relationship.closeness, emotion_signal),
@@ -439,16 +449,6 @@ class InitiativeService:
                 source_kind=SourceKind.SYSTEM_DERIVED,
             )
         )
-
-    def _is_quiet(self, now_ms: int) -> bool:
-        local_time = datetime.fromtimestamp(now_ms / 1000, UTC).astimezone(self._timezone).time()
-        start = time.fromisoformat(self._config.quiet_hours_start)
-        end = time.fromisoformat(self._config.quiet_hours_end)
-        if start == end:
-            return False
-        if start < end:
-            return start <= local_time < end
-        return local_time >= start or local_time < end
 
     def _local_date(self, now_ms: int) -> str:
         return (

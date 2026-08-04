@@ -295,7 +295,7 @@ class OfflineAgencyService:
             )
         return (
             "Offline agency runtime evidence:\n"
-            "- background computation exists only while an interactive host (TUI or web gateway) "
+            "- background computation exists only while the desktop gateway "
             "or standalone worker process is running\n"
             "- describe only completed episodes below as actions already performed\n"
             "- planned abilities and completed actions are different\n"
