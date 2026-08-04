@@ -8,7 +8,6 @@ from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
 
 from ssa.clock import Clock
-from ssa.config import InitiativeConfig
 from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import Event, IncomingSignal, normalize_signal
 from ssa.domain.lifecycle import (
@@ -20,6 +19,7 @@ from ssa.domain.lifecycle import (
     OutboxMessage,
 )
 from ssa.ids import IdGenerator
+from ssa.services.proactive_contact_policy import ProactiveContactLimits, ProactiveContactPolicy
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.lifecycle_repository import (
     ContactEpisodeRepository,
@@ -50,8 +50,8 @@ class ContactEpisodeService:
         events: SqliteEventRepository,
         clock: Clock,
         ids: IdGenerator,
-        config: InitiativeConfig,
         timezone: str,
+        proactive_policy: ProactiveContactPolicy,
         wait_hours: int = 6,
         max_messages: int = 3,
     ) -> None:
@@ -63,8 +63,8 @@ class ContactEpisodeService:
         self._events = events
         self._clock = clock
         self._ids = ids
-        self._config = config
         self._timezone = ZoneInfo(timezone)
+        self._proactive_policy = proactive_policy
         self._wait_ms = wait_hours * _HOUR_MS
         self._max_messages = max_messages
 
@@ -144,6 +144,9 @@ class ContactEpisodeService:
 
     def evaluate_due(self, conversation_id: str) -> ContactEvaluationResult:
         now_ms = self._clock.now_ms()
+        limits = self._proactive_policy.current()
+        if self._proactive_policy.gate(now_ms, limits) is not None:
+            return ContactEvaluationResult(0, 0, 0, ())
         observed_silence = 0
         queued_ids: list[str] = []
         withdrawn = 0
@@ -160,7 +163,7 @@ class ContactEpisodeService:
                 self._withdraw(episode, hypotheses)
                 withdrawn += 1
                 continue
-            gate_delay = self._delivery_gate_delay(conversation_id, now_ms)
+            gate_delay = self._delivery_gate_delay(conversation_id, now_ms, limits)
             if gate_delay is not None:
                 self._contacts.update(
                     episode.model_copy(
@@ -278,34 +281,27 @@ class ContactEpisodeService:
             "The contact episode reached its message bound and returned to quiet waiting.",
         )
 
-    def _delivery_gate_delay(self, conversation_id: str, now_ms: int) -> int | None:
-        if self._is_quiet(now_ms):
-            return _HOUR_MS
+    def _delivery_gate_delay(
+        self,
+        conversation_id: str,
+        now_ms: int,
+        limits: ProactiveContactLimits,
+    ) -> int | None:
         local = datetime.fromtimestamp(now_ms / 1000, UTC).astimezone(self._timezone)
         midnight = datetime.combine(local.date(), time.min, tzinfo=self._timezone)
         day_start_ms = int(midnight.timestamp() * 1000)
         if (
             self._initiatives.count_sent_since(conversation_id, day_start_ms)
-            >= self._config.daily_limit
+            >= limits.daily_limit
         ):
             return _HOUR_MS
         latest = self._initiatives.latest_sent(conversation_id)
-        cooldown_ms = self._config.cooldown_minutes * 60_000
+        cooldown_ms = limits.cooldown_minutes * 60_000
         if latest is not None:
             remaining = cooldown_ms - (now_ms - latest.updated_at_ms)
             if remaining > 0:
                 return remaining
         return None
-
-    def _is_quiet(self, now_ms: int) -> bool:
-        local_time = datetime.fromtimestamp(now_ms / 1000, UTC).astimezone(self._timezone).time()
-        start = time.fromisoformat(self._config.quiet_hours_start)
-        end = time.fromisoformat(self._config.quiet_hours_end)
-        if start == end:
-            return False
-        if start < end:
-            return start <= local_time < end
-        return local_time >= start or local_time < end
 
     @staticmethod
     def _silence_hypotheses(current: dict[str, float]) -> dict[str, float]:

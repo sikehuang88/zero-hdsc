@@ -18,7 +18,6 @@ dependencies = [
     "jinja2>=3.1",
     "rich>=14.0",
     "sqlite-vec>=0.1.0",
-    "textual>=3.0",
     "tzdata>=2026.1; sys_platform == 'win32'",
 ]
 

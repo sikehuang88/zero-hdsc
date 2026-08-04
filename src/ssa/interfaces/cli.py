@@ -23,9 +23,8 @@ def _parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("doctor", "check the core runtime and database"),
         ("init-db", "initialize or upgrade the database"),
-        ("tui", "launch the interactive terminal workspace"),
         ("worker", "run the persistent autonomous lifecycle worker"),
-        ("web", "run the HTTP/SSE gateway for browser frontends"),
+        ("web", "run the HTTP/SSE gateway for the desktop client"),
     ):
         command = commands.add_parser(name, help=help_text)
         command.add_argument(
@@ -39,13 +38,6 @@ def _parser() -> argparse.ArgumentParser:
             metavar="PATH",
             help="override the configured SQLite path",
         )
-        if name == "tui":
-            command.add_argument(
-                "--conversation",
-                default="cli-primary",
-                metavar="ID",
-                help="persistent conversation ID (default: cli-primary)",
-            )
         if name == "worker":
             command.add_argument(
                 "--conversation",
@@ -68,9 +60,9 @@ def _parser() -> argparse.ArgumentParser:
         if name == "web":
             command.add_argument(
                 "--conversation",
-                default="web-primary",
+                default="cli-primary",
                 metavar="ID",
-                help="persistent conversation ID (default: web-primary)",
+                help="persistent conversation ID (default: cli-primary)",
             )
             command.add_argument(
                 "--host",
@@ -168,12 +160,6 @@ def _init_database(settings: Settings) -> int:
             database.close()
 
 
-def _launch_tui(settings: Settings, conversation_id: str) -> int:
-    from ssa.interfaces.tui import run_tui
-
-    return run_tui(settings, conversation_id=conversation_id)
-
-
 def _launch_worker(
     settings: Settings,
     conversation_id: str,
@@ -247,12 +233,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _doctor(settings)
     if args.command == "init-db":
         return _init_database(settings)
-    if args.command == "tui":
-        try:
-            return _launch_tui(settings, str(args.conversation))
-        except Exception as exc:
-            print(f"TUI startup failed: {exc}", file=sys.stderr)
-            return 1
     if args.command == "worker":
         try:
             return _launch_worker(

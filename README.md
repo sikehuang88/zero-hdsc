@@ -102,20 +102,24 @@ thinking mode/effort, multimodal model and endpoint, LiteLLM runtime presence,
 and whether each API secret is configured. It never prints secret values or
 makes a paid API request.
 
-### Launch the interactive terminal
+### Launch the desktop gateway
 
 ```powershell
-uv run hdsc tui
+uv run hdsc web
 ```
 
-The TUI and web gateway register the persistent P0-P6 lifecycle at startup and
+The desktop client (`zero-web`) starts this gateway itself as a sidecar; run it
+by hand only when driving the API directly. Both paths default to the
+`cli-primary` conversation, which holds the accumulated trace space.
+
+The web gateway registers the persistent P0-P6 lifecycle at startup and
 advance it every two seconds without overlapping the foreground chat turn. The
 web gateway owns this loop independently of browser polling, so minimized or
 throttled frontend windows do not pause learning. Proactive messages
 are delivered through the durable outbox and appear in the same conversation
 as `agent.initiative` events.
 
-For continuous autonomy without keeping the TUI open, run the standalone
+For continuous autonomy without keeping the desktop app open, run the standalone
 worker in another terminal:
 
 ```powershell
@@ -137,10 +141,10 @@ Offline agency starts only after the configured user-absence interval and
 executes a bounded trace reflection or external-truth study. Every successful
 cycle persists an `offline_episodes` row, an evidence-linked
 `offline_artifacts` row, a lifecycle event, and the associated energy cost.
-Open the `ACTIVITY` tab or enter `/activity` to inspect the actual history and
+Query the activity API to inspect the actual history and
 artifact excerpt. A claim about past offline learning is eligible for the chat
-prompt only when a completed episode and its artifact both exist. Closing every
-interactive host (TUI and web gateway) and `hdsc worker` stops background action;
+prompt only when a completed episode and its artifact both exist. Closing the
+desktop gateway and `hdsc worker` stops background action;
 on the next launch the clock gap is observed, but no actions are backfilled for
 the stopped interval.
 
@@ -158,7 +162,7 @@ artifact becomes one `reflection_run`; the deterministic critic scores source
 coverage, provenance trust, consistency, and falsifiability. Approved proposals
 are routed to memory or to a reversible behavior experiment. Experiments are
 confirmed only by explicit later user feedback and are rolled back when that
-feedback is negative; silence is inconclusive. The `ACTIVITY` tab exposes run,
+feedback is negative; silence is inconclusive. The activity API exposes run,
 proposal, target, experiment, and evidence counts so a claimed change can be
 traced back to its source.
 
@@ -171,14 +175,10 @@ intensity, and recency. Recalled emotion may shape warmth, caution, and attentio
 but it is explicitly excluded from user/world factual evidence. Startup performs
 an idempotent bounded backfill from existing traces; low-salience history stays out.
 
-The terminal workspace keeps the live conversation on the left. Its default
-`SPACE` inspector renders the persistent trace space as a two-dimensional PCA
-projection of real embeddings: `@` marks main activation, `+` radiation, `o`
-the newest trace, and `:` semantic links. The trace list is keyboard-selectable
-and exposes activation score, freshness, importance, source, and raw content.
-Below 100 columns the workspace uses a 14-row compact map and collapses the
-trace list/detail panes, keeping the complete H2 status block visible in an
-`80x30` terminal. The full 18-row map remains visible at `120x42`.
+The desktop client renders the persistent trace space as a two-dimensional PCA
+projection of real embeddings, distinguishing main activation, radiation, the
+newest trace, and semantic links, and exposes activation score, freshness,
+importance, source, and raw content per trace.
 
 At startup, existing user/agent event pairs are indexed into the trace space
 idempotently. The current `legacy-ssa-a0` baseline activates old traces with
@@ -195,7 +195,7 @@ hours, and conversation gap, then crosses deterministic semantic cues with the
 current structured appraisal, relationship state, and activated-trace context.
 The normalized situation mode and continuous response posture are stored in
 `perception_snapshots` and reconstructed into private prompt context. The
-`STATE` inspector shows the latest local clock, mode, confidence, and gap. P1
+desktop state panel shows the latest local clock, mode, confidence, and gap. P1
 is a serving control layer; it is not the unimplemented YUANZI-5D active-
 inference loop proposed by the paper.
 
@@ -216,24 +216,16 @@ after each complete episode and is rebuilt by chronological replay at startup.
 It has no prompt effect. Promotion requires the validation gates in
 [`notes/research/2026-07-26_hdsc_validation_framework.md`](notes/research/2026-07-26_hdsc_validation_framework.md).
 
-The remaining inspector tabs expose organism state, relationship state,
-persisted long-term memories, and evidence-backed self-beliefs. The status line
-reports request latency, token usage, and KV Cache hit ratio.
+The remaining desktop panels expose organism state, relationship state,
+persisted long-term memories, and evidence-backed self-beliefs, plus request
+latency, token usage, and KV Cache hit ratio.
 
 ### Multimodal attachments
 
-The TUI can queue up to eight images or files for the next message. The
+Up to eight images or files can be queued for the next message. The
 production adapter uses the OpenAI-compatible Responses API at
 `https://sky1818.com/v1/responses` with `gpt-5.6-luna`. Configure the secret as
 `HDSC_MULTIMODAL_API_KEY` (or `MAGICAI_API_KEY`) in the ignored local `.env`.
-
-```text
-/attach "E:\research\diagram.png"
-/attach "E:\research\paper.pdf"
-/attachments
-/detach 1
-/clear-attachments
-```
 
 Images are sent as `input_image`, PDF/Office documents as `input_file`, and
 text/code formats as attributed `input_text`. Multiple files share one
@@ -319,20 +311,13 @@ code, and argument/output hashes. Runtime controls are under `[tools]` in
 Use a separate persistent conversation when needed:
 
 ```powershell
-uv run hdsc tui --conversation research-notes
+uv run hdsc web --conversation research-notes
 ```
 
-Keyboard controls: `Ctrl+Q` quit, `Ctrl+R` refresh, `Ctrl+L` clear the visible
-log, and `F1` show slash commands. The main commands are `/space`, `/state`,
-`/relation`, `/memory`, `/identity`, `/activity`, `/attach`, `/attachments`,
-`/detach`, `/clear-attachments`, `/refresh`, `/clear`, and `/quit`.
-
-Typing `/` opens the command palette above the composer. Prefix text filters
-the central command registry; use `Up`/`Down` to select, `Tab` to complete,
-`Enter` to complete a partial command or execute a complete command, and
-`Escape` to close the palette. Command names, aliases, argument hints, help
-text, and action IDs are registered in `src/ssa/commands/registry.py`, so the
-palette and `/help` remain synchronized as capabilities are added.
+Traces, state, and events are isolated per `conversation_id`, so a separate
+conversation is a separate life. The default `cli-primary` holds the
+accumulated history; do not point the gateway at a new ID unless a blank space
+is intended.
 
 ---
 
@@ -353,7 +338,7 @@ ssa/
 │   ├── builtin_skills/ # bundled official-format SKILL.md packages
 │   ├── tools/        # autonomous capability registry + global host executors
 │   ├── adapters/     # llm, embedding, telegram
-│   ├── interfaces/   # cli, telegram_bot, admin_api
+│   ├── interfaces/   # cli, web gateway (desktop client API)
 │   ├── prompts/      # jinja2 templates
 │   └── observability/
 ├── tests/

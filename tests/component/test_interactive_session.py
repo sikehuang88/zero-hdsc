@@ -29,6 +29,7 @@ from ssa.config import DatabaseConfig, HDSCConfig, Settings
 from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import Event, compute_content_hash
 from ssa.domain.lifecycle import InnerLifeMode
+from ssa.domain.relationship_preferences import RelationshipPreferences, RelationshipSupportMode
 from ssa.ids import SequentialIdGenerator
 from ssa.runtime.interactive import (
     _CHAT_SYSTEM_PROMPT,
@@ -42,6 +43,7 @@ from ssa.runtime.interactive import (
 )
 from ssa.storage.database import Database
 from ssa.storage.event_repository import SqliteEventRepository
+from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 from ssa.tools.kernel import ToolKernel
 from ssa.tools.models import (
     ImageGenerationArguments,
@@ -134,15 +136,43 @@ def test_relationship_contract_accepts_natural_partner_reply() -> None:
     assert _relationship_contract_violations(reply) == ()
 
 
-def test_chat_persona_is_hard_locked_to_venomous_older_sister() -> None:
+def test_chat_persona_keeps_identity_but_allows_situational_sharpness() -> None:
     normalized = _CHAT_SYSTEM_PROMPT.casefold()
 
-    assert "permanent speaking style" in normalized
-    assert "venomous older sister" in normalized
-    assert "knife-sharp mouth and a soft heart" in normalized
+    assert "stable personality" in normalized
+    assert "user-controlled and situation-aware" in normalized
+    assert "sharp mouth" in normalized
     assert "therapist language" in normalized
     assert "concrete protection" in normalized
-    assert "permanent venomous older sister" in _RELATIONSHIP_REWRITE_INSTRUCTION
+    assert "active relationship preferences" in _RELATIONSHIP_REWRITE_INSTRUCTION
+
+
+@pytest.mark.asyncio
+async def test_saved_relationship_preferences_are_injected_into_next_chat_request(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMAdapter()
+    llm.set_response("interactive_chat", "我在,先陪你把这口气缓下来。")
+    llm.set_response("appraisal", _appraisal_json())
+    session = _session(tmp_path, llm)
+    try:
+        RelationshipPreferencesRepository(str(tmp_path / "interactive.db")).save(
+            RelationshipPreferences(
+                venom_intensity=12,
+                support_mode=RelationshipSupportMode.COMFORT,
+            )
+        )
+
+        await session.send("今天有点撑不住。")
+
+        chat_request = next(call for call in llm.calls if call.purpose == "interactive_chat")
+        system_message = chat_request.messages[0].content or ""
+        assert "venom_intensity=12/100" in system_message
+        assert "support_mode=comfort" in system_message
+        assert "mostly gentle" in system_message
+        assert "companionship before solutions" in system_message
+    finally:
+        session.close()
 
 
 def _appraisal_json() -> str:
@@ -640,9 +670,7 @@ async def test_send_persists_turn_and_advances_dashboard(tmp_path: Path) -> None
         )
         assert "Offline agency runtime evidence" in (chat_request.messages[-1].content or "")
         assert "Reflective learning policy evidence" in (chat_request.messages[-1].content or "")
-        assert "only while an interactive host (TUI or web gateway)" in (
-            chat_request.messages[-1].content or ""
-        )
+        assert "only while the desktop gateway" in (chat_request.messages[-1].content or "")
     finally:
         session.close()
 

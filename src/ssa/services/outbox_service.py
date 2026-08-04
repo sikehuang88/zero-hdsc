@@ -13,6 +13,7 @@ from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import Event, IncomingSignal, normalize_signal
 from ssa.domain.lifecycle import Initiative, InitiativeStatus, OutboxMessage, OutboxStatus
 from ssa.ids import IdGenerator
+from ssa.services.proactive_contact_policy import ProactiveContactPolicy
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.lifecycle_repository import InitiativeRepository, OutboxRepository
 
@@ -28,7 +29,7 @@ class ChannelAdapter(Protocol):
 
 
 class LocalEventChannel:
-    """A zero-side-effect channel consumed from the local event ledger by the TUI."""
+    """A zero-side-effect channel consumed from the local event ledger by the desktop client."""
 
     async def deliver(self, message: OutboxMessage) -> DeliveryReceipt:
         return DeliveryReceipt(channel_message_id=message.id)
@@ -88,6 +89,7 @@ class OutboxDeliveryService:
         events: SqliteEventRepository,
         clock: Clock,
         ids: IdGenerator,
+        proactive_policy: ProactiveContactPolicy | None = None,
         adapters: Mapping[str, ChannelAdapter] | None = None,
         on_delivered: DeliveryHook | None = None,
         lease_ms: int = 60_000,
@@ -98,6 +100,7 @@ class OutboxDeliveryService:
         self._events = events
         self._clock = clock
         self._ids = ids
+        self._proactive_policy = proactive_policy
         self._adapters = dict(adapters or {"local": LocalEventChannel()})
         self._on_delivered = on_delivered
         self._lease_ms = lease_ms
@@ -105,6 +108,11 @@ class OutboxDeliveryService:
 
     async def deliver_due(self, *, limit: int = 8) -> DeliveryBatchResult:
         now_ms = self._clock.now_ms()
+        if (
+            self._proactive_policy is not None
+            and self._proactive_policy.gate(now_ms) is not None
+        ):
+            return DeliveryBatchResult(0, 0, 0, 0, ())
         claimed = self._outbox.claim_due(now_ms, lease_ms=self._lease_ms, limit=limit)
         delivered_events: list[Event] = []
         failed = 0

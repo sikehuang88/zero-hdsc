@@ -30,6 +30,7 @@ from ssa.services.outbox_service import (
     OutboxDeliveryService,
     WindowsDesktopChannel,
 )
+from ssa.services.proactive_contact_policy import ProactiveContactPolicy
 from ssa.services.reflective_learning_service import ReflectiveLearningService
 from ssa.services.resting_state_service import RestingStateService
 from ssa.services.world_observation_service import WorldObservationService
@@ -50,6 +51,7 @@ from ssa.storage.lifecycle_repository import (
     WorldObservationRepository,
 )
 from ssa.storage.memory_repository import SqliteMemoryRepository
+from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 from ssa.storage.relationship_repository import RelationshipRepository
 from ssa.storage.state_repository import StateRepository
 from ssa.storage.trace_repository import SqliteTraceRepository
@@ -104,6 +106,15 @@ class AutonomousRuntime:
         self.world_observations = WorldObservationRepository(connection)
         self.learning = SqliteLearningRepository(connection)
         self.memories = SqliteMemoryRepository(connection)
+        self.relationship_preferences = RelationshipPreferencesRepository(
+            str(database.path),
+            busy_timeout_ms=settings.database.busy_timeout_ms,
+        )
+        self.proactive_policy = ProactiveContactPolicy(
+            preferences=self.relationship_preferences,
+            config=settings.initiative,
+            timezone=settings.app.timezone,
+        )
         embedding_service = embedding or SentenceTransformerEmbeddingService(settings.embedding)
 
         self.goal_service = GoalService(
@@ -138,6 +149,7 @@ class AutonomousRuntime:
             goal_config=settings.goal,
             llm_config=settings.llm,
             timezone=settings.app.timezone,
+            proactive_policy=self.proactive_policy,
             llm=llm,
         )
         self.contact_service = ContactEpisodeService(
@@ -147,8 +159,8 @@ class AutonomousRuntime:
             events=self.events,
             clock=self._clock,
             ids=self._ids,
-            config=settings.initiative,
             timezone=settings.app.timezone,
+            proactive_policy=self.proactive_policy,
         )
         self.inner_service = InnerLifeService(
             states=self.inner_states,
@@ -167,6 +179,7 @@ class AutonomousRuntime:
             events=self.events,
             clock=self._clock,
             ids=self._ids,
+            proactive_policy=self.proactive_policy,
             adapters=adapters,
             on_delivered=self._on_delivered,
         )

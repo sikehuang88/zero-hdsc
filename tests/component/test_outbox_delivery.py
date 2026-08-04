@@ -7,13 +7,16 @@ from pathlib import Path
 import pytest
 
 from ssa.clock import FrozenClock
-from ssa.config import DatabaseConfig, Settings
+from ssa.config import DatabaseConfig, InitiativeConfig, Settings
 from ssa.domain.lifecycle import Initiative, InitiativeStatus, OutboxMessage, OutboxStatus
+from ssa.domain.relationship_preferences import ProactiveFrequency, RelationshipPreferences
 from ssa.ids import SequentialIdGenerator
 from ssa.services.outbox_service import DeliveryReceipt, OutboxDeliveryService
+from ssa.services.proactive_contact_policy import ProactiveContactPolicy
 from ssa.storage.database import Database
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.lifecycle_repository import InitiativeRepository, OutboxRepository
+from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 
 
 class _FailOnceChannel:
@@ -88,6 +91,22 @@ def _queued(
     return initiative, message
 
 
+def _proactive_policy(
+    database: Database,
+    preferences: RelationshipPreferences,
+) -> tuple[ProactiveContactPolicy, RelationshipPreferencesRepository]:
+    repository = RelationshipPreferencesRepository(str(database.path))
+    repository.save(preferences)
+    return (
+        ProactiveContactPolicy(
+            preferences=repository,
+            config=InitiativeConfig(),
+            timezone="UTC",
+        ),
+        repository,
+    )
+
+
 @pytest.mark.asyncio
 async def test_local_delivery_creates_one_proactive_event(tmp_path: Path) -> None:
     database, clock, ids, initiatives, outbox, events = _setup(tmp_path)
@@ -146,6 +165,60 @@ async def test_failed_delivery_retries_after_backoff(tmp_path: Path) -> None:
         recovered = await service.deliver_due()
         assert recovered.delivered == 1
         assert channel.calls == 2
+        assert outbox.get(message.id).status == OutboxStatus.DELIVERED  # type: ignore[union-attr]
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "blocked_preferences",
+    [
+        RelationshipPreferences(
+            proactive_frequency=ProactiveFrequency.OFF,
+            quiet_hours_enabled=False,
+        ),
+        RelationshipPreferences(
+            proactive_frequency=ProactiveFrequency.BALANCED,
+            quiet_hours_enabled=True,
+            quiet_hours_start="00:00",
+            quiet_hours_end="23:59",
+        ),
+    ],
+    ids=["disabled", "quiet-hours"],
+)
+async def test_preference_gate_keeps_due_message_pending_until_resumed(
+    tmp_path: Path,
+    blocked_preferences: RelationshipPreferences,
+) -> None:
+    database, clock, ids, initiatives, outbox, events = _setup(tmp_path)
+    try:
+        _initiative, message = _queued(clock, ids, initiatives, outbox)
+        policy, repository = _proactive_policy(database, blocked_preferences)
+        service = OutboxDeliveryService(
+            outbox=outbox,
+            initiatives=initiatives,
+            events=events,
+            clock=clock,
+            ids=ids,
+            proactive_policy=policy,
+        )
+
+        blocked = await service.deliver_due()
+        pending = outbox.get(message.id)
+        assert blocked.claimed == 0
+        assert pending is not None
+        assert pending.status == OutboxStatus.PENDING
+        assert pending.attempt_count == 0
+
+        repository.save(
+            RelationshipPreferences(
+                proactive_frequency=ProactiveFrequency.BALANCED,
+                quiet_hours_enabled=False,
+            )
+        )
+        resumed = await service.deliver_due()
+        assert resumed.delivered == 1
         assert outbox.get(message.id).status == OutboxStatus.DELIVERED  # type: ignore[union-attr]
     finally:
         database.close()

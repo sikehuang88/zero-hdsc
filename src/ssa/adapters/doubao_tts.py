@@ -176,6 +176,11 @@ class DoubaoSeedTTSAdapter:
         text: str,
         *,
         context_texts: Sequence[str] | None = None,
+        speech_rate: int | None = None,
+        loudness_rate: int | None = None,
+        emotion: str | None = None,
+        emotion_scale: int | None = None,
+        pitch: int | None = None,
     ) -> DoubaoTTSResult:
         owns_connection = self._websocket is None
         if owns_connection:
@@ -184,7 +189,15 @@ class DoubaoSeedTTSAdapter:
         usage: dict[str, Any] | None = None
         log_id = self._log_id
         try:
-            async for event in self.stream(text, context_texts=context_texts):
+            async for event in self.stream(
+                text,
+                context_texts=context_texts,
+                speech_rate=speech_rate,
+                loudness_rate=loudness_rate,
+                emotion=emotion,
+                emotion_scale=emotion_scale,
+                pitch=pitch,
+            ):
                 if event.audio:
                     audio.extend(event.audio)
                 if event.finished:
@@ -200,6 +213,11 @@ class DoubaoSeedTTSAdapter:
         text: str,
         *,
         context_texts: Sequence[str] | None = None,
+        speech_rate: int | None = None,
+        loudness_rate: int | None = None,
+        emotion: str | None = None,
+        emotion_scale: int | None = None,
+        pitch: int | None = None,
     ) -> AsyncIterator[DoubaoTTSStreamEvent]:
         async def one_text() -> AsyncIterator[str]:
             yield text
@@ -207,6 +225,11 @@ class DoubaoSeedTTSAdapter:
         async for event in self.stream_segments(
             one_text(),
             context_texts=context_texts,
+            speech_rate=speech_rate,
+            loudness_rate=loudness_rate,
+            emotion=emotion,
+            emotion_scale=emotion_scale,
+            pitch=pitch,
         ):
             yield event
 
@@ -215,6 +238,11 @@ class DoubaoSeedTTSAdapter:
         texts: AsyncIterable[str],
         *,
         context_texts: Sequence[str] | None = None,
+        speech_rate: int | None = None,
+        loudness_rate: int | None = None,
+        emotion: str | None = None,
+        emotion_scale: int | None = None,
+        pitch: int | None = None,
     ) -> AsyncIterator[DoubaoTTSStreamEvent]:
         if self._websocket is None:
             raise DoubaoTTSError("Doubao TTS connection is not open")
@@ -225,34 +253,52 @@ class DoubaoSeedTTSAdapter:
         audio_bytes = 0
         session_id = str(uuid.uuid4())
         try:
-            base_request = {
-                "req_params": {
-                    "speaker": self._speaker,
-                    "audio_params": {
-                        "format": self._audio_format,
-                        "sample_rate": self._sample_rate,
-                        "enable_subtitle": self._enable_subtitle,
-                    },
-                    "additions": json.dumps(
-                        {
-                            "disable_markdown_filter": True,
-                            "disable_emoji_filter": True,
-                        },
-                        ensure_ascii=False,
-                    ),
-                }
+            normalized_emotion = emotion.strip() if emotion else None
+            self._validate_voice_control("speech_rate", speech_rate, -50, 100)
+            self._validate_voice_control("loudness_rate", loudness_rate, -50, 100)
+            self._validate_voice_control("emotion_scale", emotion_scale, 1, 5)
+            self._validate_voice_control("pitch", pitch, -12, 12)
+            if emotion_scale is not None and normalized_emotion is None:
+                raise ValueError("Doubao TTS emotion_scale requires emotion")
+
+            audio_params: dict[str, Any] = {
+                "format": self._audio_format,
+                "sample_rate": self._sample_rate,
+                "enable_subtitle": self._enable_subtitle,
+            }
+            if speech_rate is not None:
+                audio_params["speech_rate"] = speech_rate
+            if loudness_rate is not None:
+                audio_params["loudness_rate"] = loudness_rate
+            if normalized_emotion is not None:
+                audio_params["emotion"] = normalized_emotion
+                if emotion_scale is not None:
+                    audio_params["emotion_scale"] = emotion_scale
+
+            additions: dict[str, Any] = {
+                "disable_markdown_filter": True,
+                "disable_emoji_filter": True,
             }
             if self._section_id is not None:
-                base_request["req_params"]["section_id"] = self._section_id
+                additions["section_id"] = self._section_id
             active_context_texts = (
                 self._context_texts
                 if context_texts is None
                 else tuple(text.strip() for text in context_texts if text.strip())[:4]
             )
             if active_context_texts:
-                base_request["req_params"]["context_texts"] = list(
-                    active_context_texts
-                )
+                # Seed TTS 2.0 currently consumes the first context item only.
+                additions["context_texts"] = ["。".join(active_context_texts)]
+            if pitch is not None:
+                additions["post_process"] = {"pitch": pitch}
+
+            base_request = {
+                "req_params": {
+                    "speaker": self._speaker,
+                    "audio_params": audio_params,
+                    "additions": json.dumps(additions, ensure_ascii=False),
+                }
+            }
             start_request = {**base_request, "event": int(EventType.START_SESSION)}
             await self._send(
                 websocket,
@@ -323,6 +369,22 @@ class DoubaoSeedTTSAdapter:
                     # The primary stream exception has already been surfaced. Retrieving the
                     # sender failure here prevents an orphaned task warning.
                     pass
+
+    @staticmethod
+    def _validate_voice_control(
+        name: str,
+        value: int | None,
+        minimum: int,
+        maximum: int,
+    ) -> None:
+        if value is None:
+            return
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"Doubao TTS {name} must be an integer")
+        if not minimum <= value <= maximum:
+            raise ValueError(
+                f"Doubao TTS {name} must be between {minimum} and {maximum}"
+            )
 
     async def _stream_texts(
         self,
