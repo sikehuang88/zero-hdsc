@@ -555,7 +555,7 @@ g_t^{T}\bar g=\Bigl(\sum_iw_i\tilde g_i\Bigr)^{T}\bar g+\xi_t^{T}\bar g
  +a\,H^{err}_t
  +b\,arousal_t
  +c\,uncertainty_t
- +d\,E_t,\ 
+ +d\,E_t,
  \sigma_{min},\sigma_{max}\bigr)
 \]
 
