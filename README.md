@@ -361,6 +361,43 @@ ssa/
 
 Set via `config/defaults.toml` → `[ablation].baseline`.
 
+## SEOS shadow kernel
+
+The first SEOS implementation is a side-effect-free offline kernel. It provides
+typed primitive operators, immutable DAG programs, `Eff` linearity checking,
+canonical genotype hashes, deterministic point variation and a bounded
+Pareto/MAP-Elites-style archive. It is shadow-only and does not participate in
+the live conversation path.
+
+```python
+from ssa.hdsc import (
+    HV,
+    Node,
+    Program,
+    ProgramInput,
+    check_linearity,
+    program_digest,
+    type_check,
+)
+
+program = Program(
+    inputs=(ProgramInput("left", HV), ProgramInput("right", HV)),
+    nodes=(Node("root", "bind", ("left", "right")),),
+    outputs=("root",),
+)
+type_check(program)
+check_linearity(program)
+print(program_digest(program))
+```
+
+Implementation files:
+
+- `src/ssa/hdsc/operators.py` — type AST, signatures and primitive registry.
+- `src/ssa/hdsc/program.py` — typed DAG checks, effect linearity, digest and cost.
+- `src/ssa/hdsc/variation.py` — deterministic mutation and one-node crossover.
+- `src/ssa/hdsc/archive.py` — separated Pareto objectives and behavior archive.
+- `tests/unit/test_seos_program.py` — P0/P1 unit coverage.
+
 ## License
 
 MIT.
