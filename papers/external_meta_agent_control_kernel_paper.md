@@ -108,6 +108,71 @@ I(z_t;o_{t+1})
 
 系统状态由多个节点和关系组成。节点可以是 trace 社区、行为策略、目标或外部工具；边可以表示语义关联、情绪关联、因果证据或竞争关系。拓扑在运行中局部重连，而长期归档保持可追溯。小世界重连的结构性直觉可参考 Watts & Strogatz（1998），本文的拓扑规则仍需通过实验确定。
 
+### 2.5 非人类中心的高维表示
+
+本文不把人类人格、情绪和社会行为作为智能系统的唯一参照。系统的身份可以由高维状态分布、关系拓扑和长期策略轨迹定义。相关表示方法可追溯到稀疏分布式记忆、全息降维表示和张量积表示（Kanerva, 1988；Plate, 1995；Smolensky, 1990；Kanerva, 2009）。
+
+高维超向量采用三种基本算子：
+
+\[
+\operatorname{bind}(a,b)=a\otimes b
+\]
+
+\[
+\operatorname{bundle}(a_1,\ldots,a_n)
+ =\operatorname{sign}(a_1+\cdots+a_n)
+\]
+
+\[
+\operatorname{permute}(a)=\rho(a)
+\]
+
+其中 \(\otimes\) 可以采用随机置换后的逐元素乘法，\(\rho\) 是保持范数的维度置换，\(\operatorname{bundle}\) 用于叠加多个角色或关系。一个事件的超向量编码可以写成：
+
+\[
+h_t=\operatorname{bundle}(
+\operatorname{bind}(H_{content},C_{content}),
+\operatorname{bind}(H_{actor},C_{actor}),
+\operatorname{bind}(H_{time},C_{time}),
+\operatorname{bind}(H_{relation},C_{relation}),
+\operatorname{bind}(H_{affect},C_{affect}),
+\operatorname{bind}(H_{tool},C_{tool})
+)
+\]
+
+这使内容、时间、关系和调制场以分布式方式共存；解析时使用与角色超向量的相似度或近似逆绑定，而不是依赖单一人工语义轴。
+
+本文采用三层表示：
+
+1. **连续潜空间**：VAE 的 \(z_t\) 负责压缩、生成、重建和自由能计算。
+2. **高维超向量空间**：\(h_t\) 负责组合、绑定、检索和关系解析。
+3. **动态拓扑空间**：\(G_t\) 负责节点激活、竞争、扩散和局部重连。
+
+VAE 与超向量之间使用可记录的桥接算子：
+
+\[
+z_t\sim q_\phi(z\mid o_t,m_t),\qquad h_t=Q_D(Rz_t+\epsilon_t)
+\]
+
+其中 \(R\) 是固定或缓慢更新的随机投影，\(Q_D\) 将向量量化到 \(D\) 维双极或稀疏超向量，\(\epsilon_t\) 是受控扰动。表示层的训练目标扩展为：
+
+\[
+L_{rep}=L_{recon}
+ +\beta D_{KL}(q_\phi(z\mid o,m)\|p(z))
+ +\lambda_bL_{bind}
+ +\lambda_gL_{topo}
+\]
+
+原始 trace 仍保存为不可变归档，VAE 潜变量、超向量索引和活跃拓扑都属于可重建的派生层。这样可以替换编码器、重算索引和比较不同拓扑，而不破坏历史事件。
+
+高维性使用可观测指标描述：有效维度
+
+\[
+D_{effective}=\frac{(\sum_i\lambda_i)^2}{\sum_i\lambda_i^2}
+\]
+
+以及超向量稀疏度、绑定可逆性、拓扑熵、活跃节点数、多时间尺度数量和跨模块信息增益。二维 PCA 只用于桌面端可视化，不代表系统的核心状态维度。
+
 ## 3. 系统模型
 
 ### 3.1 冻结模型与外部控制器
@@ -471,6 +536,18 @@ user.message
 - 快慢策略版本的差异评估；
 - 低证据变更的显式遗忘。
 
+### 8.4 高维表示层落点
+
+建议新增 `ssa/hdsc/hypervector.py` 和 `ssa/services/latent_bridge.py`：
+
+- `hypervector.py`：绑定、叠加、置换、相似度、稀疏度和随机种子管理；
+- `latent_bridge.py`：连续 VAE 潜变量与高维超向量之间的投影、量化和版本记录；
+- `TraceSpaceService`：同时维护连续 embedding、超向量索引和关系边；
+- `active_space.py`：从超向量共激活和向量相似度中构造动态活动图；
+- `巩固循环`：对潜变量和超向量进行离线 replay、社区检测和重算。
+
+所有派生表示需要记录 `encoder_id`、`embedding_dim`、`hypervector_dim`、`projection_seed` 和 `schema_version`，确保编码器升级后可以区分旧索引并执行迁移。
+
 ## 9. 稳定性边界
 
 “持续不稳定”应定义为受控亚稳态，而不是无限发散。建议满足：
@@ -578,3 +655,7 @@ H5：快慢变量分离能够降低长期策略的无证据漂移。
 9. Lopez-Paz, D., & Ranzato, M. (2017). Gradient Episodic Memory for Continual Learning. *Advances in Neural Information Processing Systems*, 30. https://arxiv.org/abs/1706.08840
 10. Salimans, T. et al. (2017). Evolution Strategies as a Scalable Alternative to Reinforcement Learning. arXiv:1703.03864. https://arxiv.org/abs/1703.03864
 11. Watts, D. J., & Strogatz, S. H. (1998). Collective dynamics of small-world networks. *Nature*, 393, 440-442. https://doi.org/10.1038/30918
+12. Kanerva, P. (1988). *Sparse Distributed Memory*. MIT Press. https://mitpress.mit.edu/9780262610590/sparse-distributed-memory/
+13. Plate, T. A. (1995). Holographic Reduced Representations. *IEEE Transactions on Neural Networks*, 6(3), 623-641. https://doi.org/10.1109/72.377968
+14. Smolensky, P. (1990). Tensor product variable binding and the representation of symbolic structures in connectionist systems. *Artificial Intelligence*, 46(1-2), 159-216. https://doi.org/10.1016/0004-3702(90)90007-M
+15. Kanerva, P. (2009). Hyperdimensional Computing: An Introduction to Computing in Distributed Representation with High-Dimensional Random Vectors. *Cognitive Computation*, 1, 139-159. https://doi.org/10.1007/s12559-009-9009-8
