@@ -11,6 +11,7 @@ from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import Event, IncomingSignal, normalize_signal
 from ssa.domain.lifecycle import EmotionType
 from ssa.domain.traces import ActivatedTrace, Trace
+from ssa.hdsc.resonance import RecallState
 from ssa.ids import SequentialIdGenerator
 from ssa.services.emotional_memory_service import EmotionalMemoryService
 from ssa.storage.database import Database
@@ -144,6 +145,39 @@ def test_emotional_library_captures_and_recalls_subjective_continuity(
         recalled = repository.find_by_origin_trace(trace.id)
         assert recalled is not None
         assert recalled.recall_count == 1
+
+        resonant = service.recall(
+            "conversation-1",
+            "刚才说到想你和陪伴",
+            [
+                ActivatedTrace(
+                    trace=trace,
+                    rank=1,
+                    score=0.9,
+                    semantic_similarity=0.9,
+                    freshness=1.0,
+                    importance_factor=0.8,
+                    activation_kind="resonance",
+                    coupling_mass=0.8,
+                    detuning=0.1,
+                )
+            ],
+            state=RecallState(
+                valence=0.75,
+                arousal=0.7,
+                connection_need=0.9,
+                situation_mode="reminisce",
+            ),
+        )
+        assert len(resonant) == 1
+        assert resonant[0].resonance_ratio > 1.35
+        assert resonant[0].damping < 1.0
+        assert service.recall(
+            "conversation-1",
+            "完全没有图传播证据的回忆",
+            [],
+            state=RecallState(situation_mode="reminisce"),
+        ) == []
     finally:
         database.close()
 

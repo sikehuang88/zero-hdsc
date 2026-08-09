@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -51,12 +52,20 @@ class Trace(BaseModel):
         return value
 
 
+class TraceLinkType(StrEnum):
+    SEMANTIC = "semantic"
+    TEMPORAL = "temporal"
+    AFFECTIVE = "affective"
+    ENTITY = "entity"
+    CAUSAL = "causal"
+
+
 class TraceLink(BaseModel):
     """Directed association used for bounded radiation activation."""
 
     source_trace_id: str
     target_trace_id: str
-    link_type: str = "semantic"
+    link_type: TraceLinkType = TraceLinkType.SEMANTIC
     weight: float
     created_at_ms: int = Field(ge=0)
 
@@ -70,7 +79,14 @@ class ActivatedTrace(BaseModel):
     semantic_similarity: float = Field(ge=0.0, le=1.0)
     freshness: float = Field(ge=0.0, le=1.0)
     importance_factor: float = Field(ge=0.0, le=1.0)
-    activation_kind: Literal["main", "radiation"]
+    activation_kind: Literal["main", "radiation", "resonance"]
+    coupling_mass: float = Field(default=0.0, ge=0.0, le=1.0)
+    detuning: float = Field(default=1.0, ge=0.0)
+    damping: float = Field(default=1.0, gt=0.0)
+    resonance_amplitude: float = Field(default=0.0, ge=0.0)
+    resonance_ratio: float = Field(default=0.0, ge=0.0)
+    path_trace_ids: tuple[str, ...] = ()
+    recall_reason: str = ""
 
 
 class TraceNode(BaseModel):
@@ -85,7 +101,7 @@ class TraceNode(BaseModel):
     importance: float
     freshness: float
     activation_score: float = Field(ge=0.0)
-    activation_kind: Literal["main", "radiation"] | None = None
+    activation_kind: Literal["main", "radiation", "resonance"] | None = None
     created_at_ms: int
 
 
@@ -130,6 +146,7 @@ class TraceSpaceSnapshot(BaseModel):
     )
     shadow_affects_prompt: bool = False
     stability_audit: TraceSpaceStabilityAudit | None = None
+    resonance_audit: ResonanceRecallAudit | None = None
 
     @property
     def visible_count(self) -> int:
@@ -142,10 +159,46 @@ class TraceSpaceSnapshot(BaseModel):
         return sum(node.activation_kind is not None for node in self.nodes)
 
 
+class ResonanceCandidateAudit(BaseModel):
+    trace_id: str
+    content_distance: float = Field(ge=0.0)
+    affect_distance: float = Field(ge=0.0)
+    relation_distance: float = Field(ge=0.0)
+    situation_distance: float = Field(ge=0.0)
+    arc_distance: float = Field(ge=0.0)
+    detuning: float = Field(ge=0.0)
+    coupling_mass: float = Field(ge=0.0, le=1.0)
+    damping: float = Field(gt=0.0)
+    amplitude: float = Field(ge=0.0)
+    background_ratio: float = Field(ge=0.0)
+    path_trace_ids: tuple[str, ...] = ()
+    emerged: bool = False
+
+
+class ResonanceRecallAudit(BaseModel):
+    id: str
+    conversation_id: str
+    query_digest: str
+    situation_mode: str
+    hop_budget: int = Field(ge=1)
+    edge_gains: dict[TraceLinkType, float]
+    candidates: tuple[ResonanceCandidateAudit, ...]
+    selected_trace_ids: tuple[str, ...]
+    background_median: float = Field(ge=0.0)
+    emergence_ratio: float = Field(gt=0.0)
+    null_mass: float = Field(ge=0.0, le=1.0)
+    conservation_residual: float
+    emerged: bool
+    created_at_ms: int = Field(ge=0)
+
+
 __all__ = [
     "ActivatedTrace",
+    "ResonanceCandidateAudit",
+    "ResonanceRecallAudit",
     "Trace",
     "TraceLink",
+    "TraceLinkType",
     "TraceNode",
     "TraceSpaceSnapshot",
     "TraceSpaceStabilityAudit",

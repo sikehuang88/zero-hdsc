@@ -39,7 +39,7 @@ dedup_similarity_threshold = 0.92
 radiation_decay = 0.5
 
 [hdsc]
-# H2 remains shadow-only; these values never alter the serving prompt path.
+# H2 remains shadow-only. Resonance retrieval uses H1D with evidence gating.
 h2_shadow_enabled = true
 h2_active_capacity = 8
 h2_candidate_top_k = 4
@@ -50,6 +50,16 @@ h2_hysteresis = 0.02
 h2_score_lipschitz_bound = 1.0
 h2_gain_margin = 0.05
 h2_mass_tolerance = 1e-10
+resonance_enabled = true
+resonance_hop_budget = 3
+resonance_emergence_ratio = 1.35
+resonance_background_floor = 0.02
+resonance_min_semantic_support = 0.12
+resonance_content_weight = 0.35
+resonance_affect_weight = 0.25
+resonance_relation_weight = 0.15
+resonance_situation_weight = 0.15
+resonance_arc_weight = 0.10
 
 [initiative]
 daily_limit = 3

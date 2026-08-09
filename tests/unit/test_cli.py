@@ -32,7 +32,7 @@ def test_cli_init_and_doctor(
 
     assert main(["init-db", "--database", str(database_path)]) == 0
     assert database_path.exists()
-    assert "schema v21" in capsys.readouterr().out
+    assert "schema v22" in capsys.readouterr().out
 
     settings = Settings(database=DatabaseConfig(path=str(database_path)))
     monkeypatch.setattr(
@@ -43,7 +43,7 @@ def test_cli_init_and_doctor(
 
     assert main(["doctor"]) == 0
     output = capsys.readouterr().out
-    assert "Schema:      v21" in output
+    assert "Schema:      v22" in output
     assert "sqlite-vec:  loaded" in output
     assert "LLM main: deepseek/deepseek-v4-flash" in output
     assert "LLM reasoning: deepseek/deepseek-v4-pro" in output

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
+from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -16,8 +18,11 @@ from ssa.domain.enums import SourceKind
 from ssa.domain.events import Event
 from ssa.domain.traces import (
     ActivatedTrace,
+    ResonanceCandidateAudit,
+    ResonanceRecallAudit,
     Trace,
     TraceLink,
+    TraceLinkType,
     TraceNode,
     TraceSpaceSnapshot,
     TraceSpaceStabilityAudit,
@@ -34,6 +39,19 @@ from ssa.hdsc.active_space import (
     bounded_active_shadow_step,
 )
 from ssa.hdsc.directed_transport import build_directed_rates
+from ssa.hdsc.resonance import (
+    RecallState,
+    ResonanceConfig,
+    arc_shape_distance,
+    effective_hop_budget,
+    gate_resonance,
+    modulated_rates,
+    resonance_metrics,
+    state_metric_tensor,
+    state_modulated_gains,
+    strongest_paths,
+    transport_coupling,
+)
 from ssa.ids import IdGenerator
 from ssa.storage.trace_repository import SqliteTraceRepository, trace_vec_rowid
 
@@ -91,6 +109,20 @@ class TraceSpaceService:
         self._h2_audits: dict[str, H2Audit] = {}
         self._h2_errors: dict[str, str] = {}
         self._h2_phases: dict[str, str] = {}
+        self._resonance_config = ResonanceConfig(
+            hop_budget=experimental.resonance_hop_budget,
+            capacity=experimental.h2_active_capacity + experimental.h2_candidate_top_k,
+            emergence_ratio=experimental.resonance_emergence_ratio,
+            background_floor=experimental.resonance_background_floor,
+            min_semantic_support=experimental.resonance_min_semantic_support,
+            content_weight=experimental.resonance_content_weight,
+            affect_weight=experimental.resonance_affect_weight,
+            relation_weight=experimental.resonance_relation_weight,
+            situation_weight=experimental.resonance_situation_weight,
+            arc_weight=experimental.resonance_arc_weight,
+        )
+        self._resonance_enabled = experimental.resonance_enabled
+        self._resonance_audits: dict[str, ResonanceRecallAudit] = {}
 
     def write_turn(
         self,
@@ -103,6 +135,7 @@ class TraceSpaceService:
         """Append one immutable episode trace for a completed interaction."""
         content = f"User: {user_event.content}\nAgent: {agent_event.content}"
         vector = self._embedding.embed_one(content)
+        previous_traces = self._repo.recent(user_event.conversation_id, limit=32)
         neighbors = self._repo.find_similar(
             vector.as_bytes(),
             conversation_id=user_event.conversation_id,
@@ -159,11 +192,12 @@ class TraceSpaceService:
                 TraceLink(
                     source_trace_id=neighbor.id,
                     target_trace_id=trace.id,
-                    link_type="temporal-forward",
+                    link_type=TraceLinkType.TEMPORAL,
                     weight=similarity,
                     created_at_ms=now_ms,
                 )
             )
+        self._add_typed_links(trace, previous_traces, user_event, agent_event, now_ms)
         if advance_shadow:
             self._advance_h2_shadow(trace)
         return trace
@@ -257,6 +291,315 @@ class TraceSpaceService:
         ordered = sorted(expanded.values(), key=lambda item: item.score, reverse=True)[:max_total]
         return [item.model_copy(update={"rank": rank}) for rank, item in enumerate(ordered, 1)]
 
+    def activate_resonant(
+        self,
+        query_text: str,
+        *,
+        conversation_id: str,
+        state: RecallState | None = None,
+        max_total: int = 12,
+    ) -> list[ActivatedTrace]:
+        """Perform bounded typed multi-hop recall with an explicit empty result."""
+        if not self._resonance_enabled or self._repo.count(conversation_id) == 0:
+            return []
+        recall_state = state or RecallState()
+        archive = self._repo.all_with_embeddings(conversation_id)
+        if not archive:
+            return []
+        traces = [item[0] for item in archive]
+        embeddings = [np.asarray(item[1], dtype=np.float64) for item in archive]
+        query_vector = np.asarray(self._embedding.embed_one(query_text).values, dtype=np.float64)
+        similarities = np.asarray(
+            [_cosine(query_vector, vector) for vector in embeddings], dtype=np.float64
+        )
+        semantic_support = np.clip(similarities, 0.0, 1.0)
+        source = semantic_support.copy()
+        if recall_state.origin_intent:
+            ages = np.asarray(
+                [trace.created_at_ms - traces[0].created_at_ms for trace in traces],
+                dtype=np.float64,
+            )
+            span = max(1.0, float(ages[-1]))
+            source = np.maximum(source, 0.25 * (1.0 - ages / span))
+        else:
+            source[semantic_support < self._resonance_config.min_semantic_support] = 0.0
+        if float(source.sum()) <= 0.0:
+            self._store_resonance_audit(
+                conversation_id,
+                query_text,
+                recall_state,
+                (),
+                (),
+                background=self._resonance_config.background_floor,
+                null_mass=1.0,
+                conservation_residual=0.0,
+                emerged=False,
+            )
+            return []
+        source /= source.sum()
+        links = self._repo.links_among([trace.id for trace in traces])
+        rates, gains = modulated_rates(traces, links, recall_state)
+        hop_budget = effective_hop_budget(self._resonance_config, recall_state)
+        coupling, h1d_audit = transport_coupling(source, rates, hop_budget)
+        paths = strongest_paths([trace.id for trace in traces], rates, source, hop_budget)
+        now_ms = self._clock.now_ms()
+        query_arc = self._query_arc(traces, recall_state)
+        metric_tensor = state_metric_tensor(recall_state, self._resonance_config)
+        raw_metrics = {}
+        trace_indexes = {trace.id: index for index, trace in enumerate(traces)}
+        for index, trace in enumerate(traces):
+            freshness = _freshness(trace.created_at_ms, now_ms)
+            age_ratio = (trace.created_at_ms - traces[0].created_at_ms) / max(
+                1.0, float(traces[-1].created_at_ms - traces[0].created_at_ms)
+            )
+            candidate_arc = self._candidate_arc(traces, index)
+            metrics = resonance_metrics(
+                content_distance=1.0 - float(semantic_support[index]),
+                affect_distance=math.hypot(
+                    (trace.valence - recall_state.valence) / 2.0,
+                    trace.arousal - recall_state.arousal,
+                )
+                / math.sqrt(2.0),
+                relation_distance=abs(trace.importance - recall_state.connection_need),
+                situation_distance=(age_ratio if recall_state.origin_intent else 1.0 - freshness),
+                arc_distance=arc_shape_distance(candidate_arc, query_arc),
+                coupling_mass=float(coupling[index]),
+                damping=1.0 / (1.0 + trace.importance),
+                config=self._resonance_config,
+                metric_tensor=metric_tensor,
+            )
+            if (
+                semantic_support[index] >= self._resonance_config.min_semantic_support
+                or recall_state.origin_intent
+            ):
+                raw_metrics[trace.id] = metrics
+        gated, background = gate_resonance(raw_metrics, self._resonance_config)
+        selected_metrics = {
+            trace_id: item
+            for trace_id, item in gated.items()
+            if item.background_ratio >= self._resonance_config.emergence_ratio
+        }
+        ranked = sorted(
+            selected_metrics.items(),
+            key=lambda item: (-item[1].amplitude, item[0]),
+        )[: min(max_total, self._resonance_config.capacity)]
+        by_id = {trace.id: trace for trace in traces}
+        activated: list[ActivatedTrace] = []
+        audits: list[ResonanceCandidateAudit] = []
+        for trace_id, metrics in gated.items():
+            audits.append(
+                ResonanceCandidateAudit(
+                    trace_id=trace_id,
+                    content_distance=metrics.content_distance,
+                    affect_distance=metrics.affect_distance,
+                    relation_distance=metrics.relation_distance,
+                    situation_distance=metrics.situation_distance,
+                    arc_distance=metrics.arc_distance,
+                    detuning=metrics.detuning,
+                    coupling_mass=metrics.coupling_mass,
+                    damping=metrics.damping,
+                    amplitude=metrics.amplitude,
+                    background_ratio=metrics.background_ratio,
+                    path_trace_ids=paths.get(trace_id, ()),
+                    emerged=trace_id in selected_metrics,
+                )
+            )
+        for rank, (trace_id, metrics) in enumerate(ranked, 1):
+            trace = by_id[trace_id]
+            activated.append(
+                ActivatedTrace(
+                    trace=trace,
+                    rank=rank,
+                    score=metrics.amplitude,
+                    semantic_similarity=float(semantic_support[trace_indexes[trace_id]]),
+                    freshness=_freshness(trace.created_at_ms, now_ms),
+                    importance_factor=trace.importance,
+                    activation_kind="resonance",
+                    coupling_mass=metrics.coupling_mass,
+                    detuning=metrics.detuning,
+                    damping=metrics.damping,
+                    resonance_amplitude=metrics.amplitude,
+                    resonance_ratio=metrics.background_ratio,
+                    path_trace_ids=paths.get(trace_id, ()),
+                    recall_reason=(
+                        f"typed {hop_budget}-hop resonance; background ratio "
+                        f"{metrics.background_ratio:.2f}"
+                    ),
+                )
+            )
+        selected_ids = tuple(item.trace.id for item in activated)
+        null_mass = max(0.0, 1.0 - sum(item.coupling_mass for item in activated))
+        self._store_resonance_audit(
+            conversation_id,
+            query_text,
+            recall_state,
+            tuple(audits),
+            selected_ids,
+            background=background,
+            null_mass=null_mass,
+            conservation_residual=h1d_audit.conservation_residual,
+            emerged=bool(activated),
+            hop_budget=hop_budget,
+            gains=gains,
+        )
+        return activated
+
+    def _add_typed_links(
+        self,
+        trace: Trace,
+        previous_traces: list[Trace],
+        user_event: Event,
+        agent_event: Event,
+        now_ms: int,
+    ) -> None:
+        """Create bounded, deterministic relation edges for the new episode."""
+        recent = previous_traces[-8:]
+        for previous in recent:
+            gap = max(0, trace.created_at_ms - previous.created_at_ms)
+            temporal_weight = _clip(math.exp(-gap / (7.0 * _DAY_MS)))
+            if temporal_weight >= 0.05:
+                self._repo.add_link(
+                    TraceLink(
+                        source_trace_id=trace.id,
+                        target_trace_id=previous.id,
+                        link_type=TraceLinkType.TEMPORAL,
+                        weight=temporal_weight,
+                        created_at_ms=now_ms,
+                    )
+                )
+                self._repo.add_link(
+                    TraceLink(
+                        source_trace_id=previous.id,
+                        target_trace_id=trace.id,
+                        link_type=TraceLinkType.TEMPORAL,
+                        weight=_clip(temporal_weight * 0.9),
+                        created_at_ms=now_ms,
+                    )
+                )
+
+            affective_distance = math.hypot(
+                (trace.valence - previous.valence) / 2.0,
+                trace.arousal - previous.arousal,
+            ) / math.sqrt(2.0)
+            affective_weight = _clip(1.0 - affective_distance)
+            if affective_weight >= 0.35:
+                self._repo.add_link(
+                    TraceLink(
+                        source_trace_id=trace.id,
+                        target_trace_id=previous.id,
+                        link_type=TraceLinkType.AFFECTIVE,
+                        weight=affective_weight,
+                        created_at_ms=now_ms,
+                    )
+                )
+
+            shared_entities = _entity_keys(trace.content) & _entity_keys(previous.content)
+            if shared_entities:
+                entity_weight = _clip(0.45 + 0.10 * min(5, len(shared_entities)))
+                self._repo.add_link(
+                    TraceLink(
+                        source_trace_id=trace.id,
+                        target_trace_id=previous.id,
+                        link_type=TraceLinkType.ENTITY,
+                        weight=entity_weight,
+                        created_at_ms=now_ms,
+                    )
+                )
+
+        # Event ancestry is the strongest available evidence-chain relation.
+        parent_event_ids = tuple(
+            event_id
+            for event_id in (user_event.parent_event_id, agent_event.parent_event_id)
+            if event_id
+        )
+        for parent_event_id in parent_event_ids:
+            parent_trace = self._repo.find_by_event(parent_event_id)
+            if parent_trace is None or parent_trace.id == trace.id:
+                continue
+            self._repo.add_link(
+                TraceLink(
+                    source_trace_id=parent_trace.id,
+                    target_trace_id=trace.id,
+                    link_type=TraceLinkType.CAUSAL,
+                    weight=0.85,
+                    created_at_ms=now_ms,
+                )
+            )
+
+    def _query_arc(
+        self,
+        traces: list[Trace],
+        state: RecallState,
+    ) -> tuple[tuple[float, float], ...]:
+        """Represent the current affect as a short trajectory, not one endpoint."""
+        if not traces:
+            return ((0.0, 0.2), (state.valence, state.arousal))
+        baseline = traces[0]
+        return (
+            (baseline.valence, baseline.arousal),
+            (
+                0.5 * baseline.valence + 0.5 * state.valence,
+                0.5 * baseline.arousal + 0.5 * state.arousal,
+            ),
+            (state.valence, state.arousal),
+        )
+
+    def _candidate_arc(
+        self,
+        traces: list[Trace],
+        index: int,
+    ) -> tuple[tuple[float, float], ...]:
+        """Return a local chronological affect arc around one candidate."""
+        if not traces:
+            return ()
+        left = max(0, index - 2)
+        right = min(len(traces), index + 3)
+        points = [(item.valence, item.arousal) for item in traces[left:right]]
+        if len(points) == 1:
+            point = points[0]
+            points = [(point[0], point[1]), (point[0], point[1]), (point[0], point[1])]
+        elif len(points) == 2:
+            points.insert(0, points[0])
+        return tuple(points)
+
+    def _store_resonance_audit(
+        self,
+        conversation_id: str,
+        query_text: str,
+        state: RecallState,
+        candidates: tuple[ResonanceCandidateAudit, ...],
+        selected_trace_ids: tuple[str, ...],
+        *,
+        background: float,
+        null_mass: float,
+        conservation_residual: float,
+        emerged: bool,
+        hop_budget: int | None = None,
+        gains: dict[TraceLinkType, float] | None = None,
+    ) -> None:
+        audit = ResonanceRecallAudit(
+            id=self._ids.new(),
+            conversation_id=conversation_id,
+            query_digest=hashlib.sha256(query_text.encode("utf-8")).hexdigest(),
+            situation_mode=state.situation_mode,
+            hop_budget=hop_budget or effective_hop_budget(self._resonance_config, state),
+            edge_gains=gains or state_modulated_gains(state),
+            candidates=candidates,
+            selected_trace_ids=selected_trace_ids,
+            background_median=max(0.0, background),
+            emergence_ratio=self._resonance_config.emergence_ratio,
+            null_mass=_clip(null_mass),
+            conservation_residual=conservation_residual,
+            emerged=emerged,
+            created_at_ms=self._clock.now_ms(),
+        )
+        self._resonance_audits[conversation_id] = audit
+        try:
+            self._repo.insert_resonance_audit(audit)
+        except Exception:
+            # Resonance is observable; audit storage failure must not block recall.
+            return
+
     def record_activation(
         self,
         *,
@@ -308,17 +651,31 @@ class TraceSpaceService:
         trace_ids = [trace.id for trace in traces]
         archive_count = self._repo.count(conversation_id)
         stability_audit, shadow_status = self._h2_snapshot(conversation_id, archive_count)
+        resonance_audit = self._resonance_audits.get(conversation_id)
+        if resonance_audit is None:
+            try:
+                resonance_audit = self._repo.latest_resonance_audit(conversation_id)
+            except Exception:
+                resonance_audit = None
+        activation_model = "legacy-ssa-a0"
+        serving_model_id = "legacy-ssa-a0"
+        if any(item.activation_kind == "resonance" for item in activations.values()):
+            activation_model = "hdsc-h1d-resonance-v1"
+            serving_model_id = activation_model
         return TraceSpaceSnapshot(
             nodes=nodes,
             links=self._repo.links_among(trace_ids),
             total_traces=archive_count,
             latest_query=latest_query,
             projection=projection,
+            activation_model=activation_model,
+            serving_model_id=serving_model_id,
             legacy_activated_count=len(activations),
             shadow_model_id=(H2_MODEL_ID if self._h2_enabled else None),
             shadow_status=shadow_status,
             shadow_affects_prompt=False,
             stability_audit=stability_audit,
+            resonance_audit=resonance_audit,
         )
 
     def directed_rate_matrix(
@@ -573,7 +930,24 @@ def _semantic_partition_id(
     return f"{_H2_PARTITION_VERSION}:{digest.hexdigest()}"
 
 
-def _cosine(left: list[float], right: list[float]) -> float:
+_ENTITY_TOKEN_RE = re.compile(r"[a-z0-9_\u3400-\u9fff]+", re.IGNORECASE)
+_ENTITY_STOPWORDS = frozenset(
+    {"user", "agent", "assistant", "the", "and", "的", "了", "是", "我", "你", "我们"}
+)
+
+
+def _entity_keys(content: str) -> set[str]:
+    tokens = {
+        token.casefold()
+        for token in _ENTITY_TOKEN_RE.findall(content)
+        if token.casefold() not in _ENTITY_STOPWORDS and len(token.strip()) >= 2
+    }
+    if "user:" in content.casefold() and "agent:" in content.casefold():
+        tokens.add("relationship:dual-actor")
+    return tokens
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     dot = sum(a * b for a, b in zip(left, right, strict=True))
     left_norm = math.sqrt(sum(value * value for value in left))
     right_norm = math.sqrt(sum(value * value for value in right))

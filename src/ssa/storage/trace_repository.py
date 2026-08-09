@@ -11,7 +11,13 @@ from typing import Any, Literal
 import numpy as np
 
 from ssa.domain.enums import SourceKind
-from ssa.domain.traces import ActivatedTrace, Trace, TraceLink
+from ssa.domain.traces import (
+    ActivatedTrace,
+    ResonanceRecallAudit,
+    Trace,
+    TraceLink,
+    TraceLinkType,
+)
 
 
 def trace_vec_rowid(trace_id: str) -> int:
@@ -72,6 +78,18 @@ class SqliteTraceRepository:
         row = self._conn.execute(
             "SELECT * FROM traces WHERE input_event_id = ? LIMIT 1",
             (input_event_id,),
+        ).fetchone()
+        return self._row_to_trace(row) if row is not None else None
+
+    def find_by_event(self, event_id: str) -> Trace | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM traces
+            WHERE input_event_id = ? OR output_event_id = ?
+            ORDER BY created_at_ms DESC, rowid DESC
+            LIMIT 1
+            """,
+            (event_id, event_id),
         ).fetchone()
         return self._row_to_trace(row) if row is not None else None
 
@@ -164,7 +182,7 @@ class SqliteTraceRepository:
             (
                 link.source_trace_id,
                 link.target_trace_id,
-                link.link_type,
+                link.link_type.value,
                 link.weight,
                 link.created_at_ms,
             ),
@@ -282,10 +300,14 @@ class SqliteTraceRepository:
             if trace is None:
                 continue
             raw_kind = str(row["activation_kind"])
-            if raw_kind not in {"main", "radiation"}:
+            if raw_kind not in {"main", "radiation", "resonance"}:
                 continue
-            activation_kind: Literal["main", "radiation"] = (
-                "main" if raw_kind == "main" else "radiation"
+            activation_kind: Literal["main", "radiation", "resonance"] = (
+                "main"
+                if raw_kind == "main"
+                else "radiation"
+                if raw_kind == "radiation"
+                else "resonance"
             )
             results.append(
                 ActivatedTrace(
@@ -299,6 +321,71 @@ class SqliteTraceRepository:
                 )
             )
         return results
+
+    def insert_resonance_audit(self, audit: ResonanceRecallAudit) -> ResonanceRecallAudit:
+        self._conn.execute(
+            """
+            INSERT INTO resonance_recall_audits (
+                id, conversation_id, query_digest, situation_mode, hop_budget,
+                edge_gains_json, candidate_audits_json, selected_trace_ids_json,
+                background_median, emergence_ratio, null_mass,
+                conservation_residual, emerged, created_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                audit.id,
+                audit.conversation_id,
+                audit.query_digest,
+                audit.situation_mode,
+                audit.hop_budget,
+                json.dumps(
+                    {key.value: value for key, value in audit.edge_gains.items()},
+                    sort_keys=True,
+                ),
+                json.dumps(
+                    [item.model_dump(mode="json") for item in audit.candidates],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                json.dumps(audit.selected_trace_ids),
+                audit.background_median,
+                audit.emergence_ratio,
+                audit.null_mass,
+                audit.conservation_residual,
+                int(audit.emerged),
+                audit.created_at_ms,
+            ),
+        )
+        return audit
+
+    def latest_resonance_audit(self, conversation_id: str) -> ResonanceRecallAudit | None:
+        row = self._conn.execute(
+            """
+            SELECT * FROM resonance_recall_audits
+            WHERE conversation_id = ?
+            ORDER BY created_at_ms DESC, rowid DESC
+            LIMIT 1
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return ResonanceRecallAudit(
+            id=str(row["id"]),
+            conversation_id=str(row["conversation_id"]),
+            query_digest=str(row["query_digest"]),
+            situation_mode=str(row["situation_mode"]),
+            hop_budget=int(row["hop_budget"]),
+            edge_gains=json.loads(str(row["edge_gains_json"])),
+            candidates=tuple(json.loads(str(row["candidate_audits_json"]))),
+            selected_trace_ids=tuple(json.loads(str(row["selected_trace_ids_json"]))),
+            background_median=float(row["background_median"]),
+            emergence_ratio=float(row["emergence_ratio"]),
+            null_mass=float(row["null_mass"]),
+            conservation_residual=float(row["conservation_residual"]),
+            emerged=bool(row["emerged"]),
+            created_at_ms=int(row["created_at_ms"]),
+        )
 
     def embedding(self, trace: Trace) -> list[float] | None:
         try:
@@ -353,7 +440,7 @@ class SqliteTraceRepository:
         return TraceLink(
             source_trace_id=str(data["source_trace_id"]),
             target_trace_id=str(data["target_trace_id"]),
-            link_type=str(data["link_type"]),
+            link_type=TraceLinkType(str(data["link_type"])),
             weight=float(data["weight"]),
             created_at_ms=int(data["created_at_ms"]),
         )

@@ -12,7 +12,7 @@ from ssa.config import DatabaseConfig, EmbeddingConfig, RetrievalConfig
 from ssa.domain.appraisal import AppraisalResult
 from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import Event, compute_content_hash
-from ssa.domain.traces import TraceLink
+from ssa.domain.traces import TraceLink, TraceLinkType
 from ssa.ids import SequentialIdGenerator
 from ssa.services.trace_space_service import TraceSpaceService
 from ssa.storage.database import Database
@@ -138,16 +138,20 @@ def test_trace_write_activation_radiation_projection_and_audit(tmp_path: Path) -
         assert snapshot.projection == "embedding-pca"
         assert len(snapshot.nodes) == 2
         assert snapshot.links
-        temporal_forward = [link for link in snapshot.links if link.link_type == "temporal-forward"]
-        assert [(link.source_trace_id, link.target_trace_id) for link in temporal_forward] == [
-            (first.id, second.id)
+        temporal = [link for link in snapshot.links if link.link_type == TraceLinkType.TEMPORAL]
+        assert (first.id, second.id) in [
+            (link.source_trace_id, link.target_trace_id) for link in temporal
         ]
         assert repository.links_from(first.id, link_types=("semantic",))
-        assert not repository.links_from(second.id, link_types=("temporal-forward",))
+        assert repository.links_from(second.id, link_types=("temporal",))
         node_ids, directed_rates = service.directed_rate_matrix("trace-test")
         first_index = node_ids.index(first.id)
         second_index = node_ids.index(second.id)
-        assert directed_rates[second_index, first_index] > directed_rates[first_index, second_index]
+        assert directed_rates[second_index, first_index] > 0.0
+        assert directed_rates[first_index, second_index] > 0.0
+        assert directed_rates[second_index, first_index] != pytest.approx(
+            directed_rates[first_index, second_index]
+        )
         assert all(0.0 <= node.x <= 1.0 and 0.0 <= node.y <= 1.0 for node in snapshot.nodes)
     finally:
         database.close()

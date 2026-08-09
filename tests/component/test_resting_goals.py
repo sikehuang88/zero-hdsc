@@ -122,7 +122,7 @@ def test_resting_state_uses_directed_radiation_and_bounded_mass(tmp_path: Path) 
             TraceLink(
                 source_trace_id=inserted[0].id,
                 target_trace_id=inserted[1].id,
-                link_type="temporal-forward",
+                link_type="temporal",
                 weight=1.0,
                 created_at_ms=clock.now_ms(),
             )

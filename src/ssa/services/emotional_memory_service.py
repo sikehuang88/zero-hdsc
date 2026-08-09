@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from math import hypot, sqrt
+from statistics import median
 
 from ssa.clock import Clock
 from ssa.config import EmotionLibraryConfig
@@ -12,6 +14,12 @@ from ssa.domain.emotional_memory import EmotionalMemory
 from ssa.domain.events import Event
 from ssa.domain.lifecycle import EmotionType
 from ssa.domain.traces import ActivatedTrace, Trace
+from ssa.hdsc.resonance import (
+    RecallState,
+    ResonanceConfig,
+    resonance_metrics,
+    state_metric_tensor,
+)
 from ssa.ids import IdGenerator
 from ssa.storage.emotional_memory_repository import EmotionalMemoryRepository
 
@@ -27,6 +35,10 @@ class EmotionalRecall:
     lexical_score: float
     trace_score: float
     recency_score: float
+    resonance_amplitude: float = 0.0
+    resonance_ratio: float = 0.0
+    detuning: float = 0.0
+    damping: float = 1.0
 
 
 class EmotionalMemoryService:
@@ -170,20 +182,134 @@ class EmotionalMemoryService:
         conversation_id: str,
         query: str,
         activated_traces: list[ActivatedTrace],
+        *,
+        state: RecallState | None = None,
+        situation_mode: str | None = None,
     ) -> list[EmotionalRecall]:
         if not self._config.enabled:
             return []
         query_terms = _terms(query)
-        active_ids = {item.trace.id for item in activated_traces}
         now_ms = self._clock.now_ms()
+        ranked: list[EmotionalRecall] = []
+        if state is None:
+            return self._recall_legacy(
+                conversation_id,
+                activated_traces,
+                query_terms=query_terms,
+                now_ms=now_ms,
+            )
+
+        if situation_mode is not None and situation_mode != state.situation_mode:
+            state = RecallState(
+                valence=state.valence,
+                arousal=state.arousal,
+                energy=state.energy,
+                connection_need=state.connection_need,
+                situation_mode=situation_mode,
+                origin_intent=state.origin_intent,
+            )
+        active_by_id = {item.trace.id: item for item in activated_traces}
+        resonance_config = ResonanceConfig()
+        metric_tensor = state_metric_tensor(state, resonance_config)
+        for memory in self._repository.candidates(
+            conversation_id,
+            limit=self._config.candidate_limit,
+        ):
+            memory_terms = _terms(f"{memory.target} {memory.trigger_summary} {memory.felt_summary}")
+            lexical = _overlap(query_terms, memory_terms)
+            matching = [
+                active_by_id[trace_id]
+                for trace_id in memory.source_trace_ids
+                if trace_id in active_by_id
+            ]
+            trace = max(
+                (min(1.0, item.coupling_mass or item.score) for item in matching),
+                default=0.0,
+            )
+            age_days = max(0.0, (now_ms - memory.updated_at_ms) / _DAY_MS)
+            recency = 0.5 ** (age_days / self._config.recency_half_life_days)
+            if lexical <= 0.0 and trace <= 0.0:
+                continue
+            content_distance = 1.0 - lexical
+            affect_distance = hypot(
+                (memory.valence - state.valence) / 2.0,
+                memory.arousal - state.arousal,
+            ) / sqrt(2.0)
+            relation_distance = (
+                0.0 if memory.target == "owner relationship" else 1.0 - state.connection_need
+            )
+            situation_distance = 0.0 if state.origin_intent and matching else 1.0 - recency
+            arc_distance = min(
+                (item.detuning / (1.0 + item.detuning) for item in matching),
+                default=0.65,
+            )
+            rehearsal = max(
+                0,
+                memory.recall_count + len(set(memory.source_event_ids)) - 1,
+            )
+            alpha = min(1.0, len(set(memory.source_event_ids)) / 3.0)
+            damping = 1.0 / (1.0 + rehearsal * alpha)
+            metrics = resonance_metrics(
+                content_distance=content_distance,
+                affect_distance=affect_distance,
+                relation_distance=relation_distance,
+                situation_distance=situation_distance,
+                arc_distance=arc_distance,
+                coupling_mass=trace,
+                damping=damping,
+                config=resonance_config,
+                metric_tensor=metric_tensor,
+            )
+            ranked.append(
+                EmotionalRecall(
+                    memory=memory,
+                    score=metrics.amplitude,
+                    lexical_score=lexical,
+                    trace_score=trace,
+                    recency_score=recency,
+                    resonance_amplitude=metrics.amplitude,
+                    detuning=metrics.detuning,
+                    damping=damping,
+                )
+            )
+        if not ranked:
+            return []
+        background = max(
+            resonance_config.background_floor,
+            float(median(item.resonance_amplitude for item in ranked))
+            if len(ranked) > 1
+            else resonance_config.background_floor,
+        )
+        emerged = [
+            replace(item, resonance_ratio=item.resonance_amplitude / background)
+            for item in ranked
+            if item.resonance_amplitude / background >= resonance_config.emergence_ratio
+        ]
+        recalled = sorted(emerged, key=lambda item: item.score, reverse=True)[
+            : self._config.recall_limit
+        ]
+        self._repository.mark_recalled(
+            [item.memory.id for item in recalled],
+            now_ms,
+        )
+        return recalled
+
+    def _recall_legacy(
+        self,
+        conversation_id: str,
+        activated_traces: list[ActivatedTrace],
+        *,
+        query_terms: set[str],
+        now_ms: int,
+    ) -> list[EmotionalRecall]:
+        """Preserve the pre-resonance score for callers without an organism state."""
+        active_ids = {item.trace.id for item in activated_traces}
         ranked: list[EmotionalRecall] = []
         for memory in self._repository.candidates(
             conversation_id,
             limit=self._config.candidate_limit,
         ):
-            memory_terms = _terms(
-                f"{memory.target} {memory.trigger_summary} {memory.felt_summary}"
-            )
+            memory_terms = _terms(f"{memory.target} {memory.trigger_summary} {memory.felt_summary}")
             lexical = _overlap(query_terms, memory_terms)
             trace = 1.0 if active_ids.intersection(memory.source_trace_ids) else 0.0
             age_days = max(0.0, (now_ms - memory.updated_at_ms) / _DAY_MS)

@@ -253,7 +253,7 @@ class RetrievalConfig(BaseModel):
 
 
 class HDSCConfig(BaseModel):
-    """Experimental HDSC kernels; shadow results never enter prompts by default."""
+    """HDSC shadow kernels and the evidence-gated resonance retriever."""
 
     h2_shadow_enabled: bool = True
     h2_active_capacity: int = 8
@@ -265,6 +265,16 @@ class HDSCConfig(BaseModel):
     h2_score_lipschitz_bound: float = 1.0
     h2_gain_margin: float = 0.05
     h2_mass_tolerance: float = 1e-10
+    resonance_enabled: bool = True
+    resonance_hop_budget: int = 3
+    resonance_emergence_ratio: float = 1.35
+    resonance_background_floor: float = 0.02
+    resonance_min_semantic_support: float = 0.12
+    resonance_content_weight: float = 0.35
+    resonance_affect_weight: float = 0.25
+    resonance_relation_weight: float = 0.15
+    resonance_situation_weight: float = 0.15
+    resonance_arc_weight: float = 0.10
 
     @model_validator(mode="after")
     def _validate_h2(self) -> HDSCConfig:
@@ -275,6 +285,14 @@ class HDSCConfig(BaseModel):
             "h2_score_lipschitz_bound": self.h2_score_lipschitz_bound,
             "h2_gain_margin": self.h2_gain_margin,
             "h2_mass_tolerance": self.h2_mass_tolerance,
+            "resonance_emergence_ratio": self.resonance_emergence_ratio,
+            "resonance_background_floor": self.resonance_background_floor,
+            "resonance_min_semantic_support": self.resonance_min_semantic_support,
+            "resonance_content_weight": self.resonance_content_weight,
+            "resonance_affect_weight": self.resonance_affect_weight,
+            "resonance_relation_weight": self.resonance_relation_weight,
+            "resonance_situation_weight": self.resonance_situation_weight,
+            "resonance_arc_weight": self.resonance_arc_weight,
         }
         if any(not math.isfinite(value) for value in numeric.values()):
             raise ValueError("H2 numeric settings must be finite")
@@ -298,6 +316,23 @@ class HDSCConfig(BaseModel):
             raise ValueError("h2_gain_margin must be in (0, 1)")
         if self.h2_mass_tolerance <= 0.0:
             raise ValueError("h2_mass_tolerance must be positive")
+        if not 1 <= self.resonance_hop_budget <= 8:
+            raise ValueError("resonance_hop_budget must be in [1, 8]")
+        if self.resonance_emergence_ratio <= 1.0:
+            raise ValueError("resonance_emergence_ratio must exceed 1")
+        if self.resonance_background_floor <= 0.0:
+            raise ValueError("resonance_background_floor must be positive")
+        if not 0.0 <= self.resonance_min_semantic_support <= 1.0:
+            raise ValueError("resonance_min_semantic_support must be in [0, 1]")
+        resonance_weights = (
+            self.resonance_content_weight,
+            self.resonance_affect_weight,
+            self.resonance_relation_weight,
+            self.resonance_situation_weight,
+            self.resonance_arc_weight,
+        )
+        if any(value < 0.0 for value in resonance_weights) or sum(resonance_weights) <= 0.0:
+            raise ValueError("resonance detuning weights must be non-negative with positive sum")
         return self
 
 

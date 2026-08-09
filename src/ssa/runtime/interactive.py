@@ -53,6 +53,7 @@ from ssa.domain.relationship import RelationshipState
 from ssa.domain.self_belief import SelfBelief, SelfBeliefStatus
 from ssa.domain.state import DeterministicStateEngine, OrganismState
 from ssa.domain.traces import ActivatedTrace, Trace, TraceSpaceSnapshot
+from ssa.hdsc.resonance import RecallState
 from ssa.ids import IdGenerator, UuidIdGenerator
 from ssa.runtime.autonomous import AutonomousRuntime
 from ssa.services.appraisal_service import AppraisalService
@@ -845,20 +846,61 @@ class DigitalLifeSession:
             now_ms = self._clock.now_ms()
             organism = self._states.latest() or OrganismState.initial(now_ms)
             relationship = self._relationships.latest() or RelationshipState.initial(now_ms)
-            activated_traces = await asyncio.to_thread(
-                self._trace_space.activate,
-                content,
-                conversation_id=self.conversation_id,
+            origin_intent = _origin_recall_intent(content)
+            recall_state = RecallState(
+                valence=organism.valence,
+                arousal=organism.arousal,
+                energy=organism.energy,
+                connection_need=organism.connection_need,
+                situation_mode="reminisce" if origin_intent else "answer",
+                origin_intent=origin_intent,
             )
+            if self._settings.hdsc.resonance_enabled:
+                try:
+                    activated_traces = await asyncio.to_thread(
+                        self._trace_space.activate_resonant,
+                        content,
+                        conversation_id=self.conversation_id,
+                        state=recall_state,
+                    )
+                except Exception:
+                    logger.warning(
+                        "resonance recall failed; using legacy activation", exc_info=True
+                    )
+                    activated_traces = []
+                # Origin questions must preserve the explicit empty-result path.
+                if not activated_traces and origin_intent:
+                    activated_traces = []
+                elif not activated_traces:
+                    activated_traces = await asyncio.to_thread(
+                        self._trace_space.activate,
+                        content,
+                        conversation_id=self.conversation_id,
+                    )
+            else:
+                activated_traces = await asyncio.to_thread(
+                    self._trace_space.activate,
+                    content,
+                    conversation_id=self.conversation_id,
+                )
             self._last_trace_query = content
-            related_memories = [
-                *_traces_as_memories(activated_traces),
-                *self._recent_memories(),
-            ][:8]
+            recall_abstained = origin_intent and not activated_traces
+            related_memories = (
+                []
+                if recall_abstained
+                else [
+                    *_traces_as_memories(activated_traces),
+                    *self._recent_memories(),
+                ][:8]
+            )
             emotional_recalls = self._emotion_library.recall(
                 self.conversation_id,
                 content,
                 activated_traces,
+                state=(recall_state if self._settings.hdsc.resonance_enabled else None),
+                situation_mode=(
+                    recall_state.situation_mode if self._settings.hdsc.resonance_enabled else None
+                ),
             )
             expression_recall = self._emotion_expression_library.recall(
                 content,
@@ -874,6 +916,7 @@ class DigitalLifeSession:
                 emotional_recalls,
                 expression_recall,
                 self._autonomous.context_summary(),
+                recall_abstained=recall_abstained,
             )
             if attachment_analysis is not None:
                 prompt_context = f"{prompt_context}\n\n{attachment_analysis.prompt_context()}"
@@ -904,6 +947,7 @@ class DigitalLifeSession:
                     "workspace_root": workspace_root,
                     "active_skill_ids": list(skill_selection.ids) if skill_selection else [],
                     "activated_trace_ids": [item.trace.id for item in activated_traces],
+                    "memory_recall_abstained": recall_abstained,
                     "expression_forms": [item.form for item in expression_recall.entries],
                     "expression_scene_ids": [item.id for item in expression_recall.scenes],
                     "attachments": attachment_metadata,
@@ -2170,6 +2214,8 @@ def _private_context(
     emotional_recalls: list[EmotionalRecall],
     expression_recall: EmotionExpressionRecall,
     autonomy_context: str,
+    *,
+    recall_abstained: bool = False,
 ) -> str:
     trace_lines = [
         f"- [{trace.activation_kind}; score={trace.score:.3f}; "
@@ -2197,6 +2243,14 @@ def _private_context(
             _state_summary(organism, relationship),
             "Activated traces from persistent space:",
             *trace_lines,
+            *(
+                (
+                    "Origin-memory gate: no archived scene exceeded the emergence threshold. "
+                    "State that this specific history is not recalled; do not infer a scene.",
+                )
+                if recall_abstained
+                else ()
+            ),
             "Active memories:",
             *memory_lines,
             "Current self-beliefs:",
@@ -2250,8 +2304,11 @@ def _traces_as_memories(activations: list[ActivatedTrace]) -> list[RetrievedMemo
                 "semantic": item.semantic_similarity,
                 "freshness": item.freshness,
                 "importance": item.importance_factor,
+                "coupling": item.coupling_mass,
+                "detuning": item.detuning,
+                "resonance_ratio": item.resonance_ratio,
             },
-            retrieval_reason=f"trace:{item.activation_kind}",
+            retrieval_reason=item.recall_reason or f"trace:{item.activation_kind}",
         )
         for item in activations
     ]
@@ -2562,6 +2619,27 @@ def _infer_intent(reply: str) -> ActionIntent:
     if stripped.endswith(("?", "\N{FULLWIDTH QUESTION MARK}")):
         return ActionIntent.ASK
     return ActionIntent.ANSWER
+
+
+_ORIGIN_RECALL_CUES = (
+    "在哪认识",
+    "在哪里认识",
+    "见过",
+    "第一次",
+    "当初",
+    "以前",
+    "回忆",
+    "记得吗",
+    "最早",
+    "how we met",
+    "first time",
+    "remember when",
+)
+
+
+def _origin_recall_intent(content: str) -> bool:
+    lowered = content.casefold()
+    return any(cue in lowered for cue in _ORIGIN_RECALL_CUES)
 
 
 async def _emit_session_event(

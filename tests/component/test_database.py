@@ -67,8 +67,8 @@ def test_initialize_creates_parent_directory(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_21_after_migrations(db: Database):
-    assert db.schema_version == 21
+def test_schema_version_is_22_after_migrations(db: Database):
+    assert db.schema_version == 22
 
 
 @pytest.mark.parametrize("column_already_present", [False, True])
@@ -130,7 +130,7 @@ def test_migration_006_upgrades_both_phase1_and_transitional_databases(
     assert legacy["version"] == 1
     assert legacy["candidate_since_ms"] == 100
     assert legacy["activated_at_ms"] == 100
-    assert upgraded.schema_version == 21
+    assert upgraded.schema_version == 22
     upgraded.close()
 
 
@@ -147,6 +147,7 @@ def test_all_tables_exist(db: Database):
         "traces",
         "trace_links",
         "trace_activations",
+        "resonance_recall_audits",
         "trace_vec",
         "state_snapshots",
         "relationship_snapshots",
@@ -196,7 +197,7 @@ def test_deferred_vector_table_is_retried_when_extension_recovers(
         int(row["version"])
         for row in deferred.connection.execute("SELECT version FROM schema_migrations")
     }
-    assert deferred.schema_version == 21
+    assert deferred.schema_version == 22
     assert 8 not in deferred_versions
     assert 10 not in deferred_versions
     assert 11 in deferred_versions
@@ -222,7 +223,7 @@ def test_deferred_vector_table_is_retried_when_extension_recovers(
         int(row["version"])
         for row in recovered.connection.execute("SELECT version FROM schema_migrations")
     }
-    assert recovered.schema_version == 21
+    assert recovered.schema_version == 22
     assert set(range(1, 12)) <= recovered_versions
     assert recovered.vec_extension_loaded is True
     assert (
