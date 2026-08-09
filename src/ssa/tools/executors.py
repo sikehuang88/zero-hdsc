@@ -18,6 +18,7 @@ from ssa.config import (
     ExternalTruthConfig,
     FirecrawlConfig,
     MultimodalConfig,
+    OpencodeConfig,
     ToolConfig,
     Win32Config,
 )
@@ -340,6 +341,9 @@ def build_default_tool_kernel(
     firecrawl_config: FirecrawlConfig | None = None,
     firecrawl_api_key: str = "",
     prediction_service: GroundedPredictionService | None = None,
+    opencode_config: OpencodeConfig | None = None,
+    opencode_server_password: str = "",
+    opencode_server_username: str = "opencode",
 ) -> ToolKernel:
     registry = ToolRegistry()
     GlobalToolExecutor(config).register_into(registry)
@@ -355,6 +359,14 @@ def build_default_tool_kernel(
         FirecrawlExecutor(firecrawl_config, firecrawl_api_key).register_into(registry)
     if multimodal_config is not None and multimodal_config.enabled and multimodal_api_key:
         GPTBridgeExecutor(multimodal_config, multimodal_api_key).register_into(registry)
+    if opencode_config is not None and opencode_config.enabled and opencode_server_password.strip():
+        from ssa.tools.opencode import OpencodeExecutor
+
+        OpencodeExecutor(
+            opencode_config,
+            opencode_server_password,
+            server_username=opencode_server_username,
+        ).register_into(registry)
     if os.name == "nt":
         MineradioExecutor().register_into(registry)
         if find_spec("websockets") is None:

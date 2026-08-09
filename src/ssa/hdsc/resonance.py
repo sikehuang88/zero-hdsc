@@ -25,6 +25,7 @@ class RecallState:
     arousal: float = 0.2
     energy: float = 0.7
     connection_need: float = 0.4
+    tension: float = 0.0
     situation_mode: str = "answer"
     origin_intent: bool = False
 

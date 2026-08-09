@@ -43,6 +43,8 @@ class EmotionExpressionRecall:
         lines = [
             "<qingxue_emotion_expression_library>",
             "Private expressive guidance, not facts and not text to quote verbatim.",
+            "Authored scenes are coverage references only. Never enact one as the current "
+            "situation; project the current emotion frame's continuous state axes instead.",
         ]
         lines.extend(f"- rule: {rule}" for rule in self.rules)
         for entry in self.entries:
@@ -61,7 +63,8 @@ class EmotionExpressionRecall:
         lines.extend(
             [
                 "Choose zero to two discourse particles only when they reveal a real shift in "
-                "stance. Never copy a scene example or mechanically imitate fillers.",
+                "stance. Never copy, paraphrase, or replay a scene example, and never "
+                "mechanically imitate fillers.",
                 "</qingxue_emotion_expression_library>",
             ]
         )

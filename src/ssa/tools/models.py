@@ -161,6 +161,55 @@ class CodingGitStatusArguments(BaseModel):
     include_untracked: bool = True
 
 
+class OpencodeFireArguments(BaseModel):
+    """Bounded coding task submitted to the local opencode service."""
+
+    task: str = Field(min_length=1, max_length=8_000)
+    project_dir: str | None = Field(default=None, max_length=4_096)
+    model: str | None = Field(default=None, max_length=200)
+
+    @field_validator("task")
+    @classmethod
+    def _task_not_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("task must not be blank")
+        return normalized
+
+    @field_validator("project_dir", "model")
+    @classmethod
+    def _optional_values_trimmed(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class OpencodeCheckArguments(BaseModel):
+    job_id: str = Field(min_length=1, max_length=200)
+    max_chars: int = Field(default=24_000, ge=1_000, le=32_000)
+
+    @field_validator("job_id")
+    @classmethod
+    def _job_id_not_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("job_id must not be blank")
+        return normalized
+
+
+class OpencodeSessionExportArguments(BaseModel):
+    job_id: str = Field(min_length=1, max_length=200)
+
+    @field_validator("job_id")
+    @classmethod
+    def _export_job_id_not_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("job_id must not be blank")
+        return normalized
+
+
 class WebSearchArguments(BaseModel):
     query: str = Field(min_length=1, max_length=500)
     max_results: int = Field(default=6, ge=1, le=12)
@@ -407,6 +456,9 @@ __all__ = [
     "MineradioControlArguments",
     "MineradioNoArguments",
     "MineradioSearchPlayArguments",
+    "OpencodeCheckArguments",
+    "OpencodeFireArguments",
+    "OpencodeSessionExportArguments",
     "PowerShellArguments",
     "ReadFileArguments",
     "SodaMusicControlArguments",

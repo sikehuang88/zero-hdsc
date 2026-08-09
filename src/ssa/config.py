@@ -36,6 +36,18 @@ class ThinkingMode(StrEnum):
     DISABLED = "disabled"
 
 
+class WarpedResonanceMode(StrEnum):
+    DISABLED = "disabled"
+    SHADOW = "shadow"
+    LIVE = "live"
+
+
+class EngramMode(StrEnum):
+    TRUNCATED_POWER = "truncated_power"
+    PPR = "ppr"
+    BOUNDED_ACTIVE = "bounded_active"
+
+
 class ReasoningEffort(StrEnum):
     HIGH = "high"
     MAX = "max"
@@ -60,6 +72,9 @@ class Secrets(BaseModel):
     doubao_app_id: str = ""
     doubao_access_token: SecretStr = SecretStr("")
     doubao_secret_key: SecretStr = SecretStr("")
+    opencode_server_password: SecretStr = SecretStr("")
+    opencode_server_username: str = "opencode"
+    broker_token: SecretStr = SecretStr("")
 
     @classmethod
     def from_env(cls, env: dict[str, str]) -> Secrets:
@@ -95,6 +110,10 @@ class Secrets(BaseModel):
             doubao_app_id=env.get("DOUBAO_APP_ID", ""),
             doubao_access_token=SecretStr(env.get("DOUBAO_ACCESS_TOKEN", "")),
             doubao_secret_key=SecretStr(env.get("DOUBAO_SECRET_KEY", "")),
+            opencode_server_password=SecretStr(env.get("OPENCODE_SERVER_PASSWORD", "")),
+            opencode_server_username=(env.get("OPENCODE_SERVER_USERNAME") or "opencode").strip()
+            or "opencode",
+            broker_token=SecretStr(env.get("HDSC_BROKER_TOKEN", "")),
         )
 
     def require_llm(self) -> str:
@@ -275,6 +294,17 @@ class HDSCConfig(BaseModel):
     resonance_relation_weight: float = 0.15
     resonance_situation_weight: float = 0.15
     resonance_arc_weight: float = 0.10
+    warped_resonance_mode: WarpedResonanceMode = WarpedResonanceMode.LIVE
+    warped_resonance_max_nodes: int = 32
+    warped_low_information: float = 0.12
+    warped_high_information: float = 0.45
+    warped_beta: float = 4.0
+    warped_bandwidth: float = 1.0
+    warped_diffusion_time: float = 0.35
+    warped_temperature: float = 0.15
+    warped_recall_count: int = 5
+    warped_detuning_cap: float = 6.0
+    warped_surfacing_margin: float = 0.25
 
     @model_validator(mode="after")
     def _validate_h2(self) -> HDSCConfig:
@@ -293,6 +323,14 @@ class HDSCConfig(BaseModel):
             "resonance_relation_weight": self.resonance_relation_weight,
             "resonance_situation_weight": self.resonance_situation_weight,
             "resonance_arc_weight": self.resonance_arc_weight,
+            "warped_low_information": self.warped_low_information,
+            "warped_high_information": self.warped_high_information,
+            "warped_beta": self.warped_beta,
+            "warped_bandwidth": self.warped_bandwidth,
+            "warped_diffusion_time": self.warped_diffusion_time,
+            "warped_temperature": self.warped_temperature,
+            "warped_detuning_cap": self.warped_detuning_cap,
+            "warped_surfacing_margin": self.warped_surfacing_margin,
         }
         if any(not math.isfinite(value) for value in numeric.values()):
             raise ValueError("H2 numeric settings must be finite")
@@ -333,6 +371,52 @@ class HDSCConfig(BaseModel):
         )
         if any(value < 0.0 for value in resonance_weights) or sum(resonance_weights) <= 0.0:
             raise ValueError("resonance detuning weights must be non-negative with positive sum")
+        if not 2 <= self.warped_resonance_max_nodes <= 256:
+            raise ValueError("warped_resonance_max_nodes must be in [2, 256]")
+        if not 0.0 <= self.warped_low_information < self.warped_high_information <= 1.0:
+            raise ValueError("warped information thresholds must satisfy 0 <= low < high <= 1")
+        if self.warped_beta < 0.0:
+            raise ValueError("warped_beta must be non-negative")
+        if (
+            self.warped_bandwidth <= 0.0
+            or self.warped_diffusion_time <= 0.0
+            or self.warped_temperature <= 0.0
+            or self.warped_detuning_cap <= 0.0
+        ):
+            raise ValueError("warped metric, temperature, and gate settings must be positive")
+        if not 1 <= self.warped_recall_count <= self.warped_resonance_max_nodes:
+            raise ValueError("warped_recall_count must be in [1, warped_resonance_max_nodes]")
+        if self.warped_surfacing_margin < 0.0:
+            raise ValueError("warped_surfacing_margin must be non-negative")
+        return self
+
+
+class EngramConfig(BaseModel):
+    """Typed directed multi-hop retrieval experiment controls."""
+
+    enabled: bool = False
+    mode: EngramMode = EngramMode.TRUNCATED_POWER
+    max_hops: int = 3
+    restart_probability: float = 0.20
+    epsilon: float = 1e-6
+    max_active: int = 64
+    max_results: int = 32
+    graph_limit: int = 512
+
+    @model_validator(mode="after")
+    def _validate_engram(self) -> EngramConfig:
+        if not 1 <= self.max_hops <= 32:
+            raise ValueError("engram max_hops must be in [1, 32]")
+        if not 0.0 < self.restart_probability <= 1.0:
+            raise ValueError("engram restart_probability must be in (0, 1]")
+        if not 0.0 <= self.epsilon <= 1.0:
+            raise ValueError("engram epsilon must be in [0, 1]")
+        if not 1 <= self.max_active <= 4_096:
+            raise ValueError("engram max_active must be in [1, 4096]")
+        if not 1 <= self.max_results <= 256:
+            raise ValueError("engram max_results must be in [1, 256]")
+        if not 1 <= self.graph_limit <= 10_000:
+            raise ValueError("engram graph_limit must be in [1, 10000]")
         return self
 
 
@@ -672,6 +756,47 @@ class MultimodalConfig(BaseModel):
         return self
 
 
+class OpencodeConfig(BaseModel):
+    """Bounded client policy for a local headless opencode service."""
+
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:4096"
+    project_dir: str = ""
+    request_timeout_seconds: int = 120
+    fire_max_concurrent: int = 2
+    poll_max_output_chars: int = 24_000
+    default_model: str = "hdsc/deepseek-v4-flash"
+
+    @field_validator("base_url", "default_model")
+    @classmethod
+    def _opencode_value_not_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("opencode config value must not be blank")
+        return normalized.rstrip("/") if "://" in normalized else normalized
+
+    @field_validator("request_timeout_seconds")
+    @classmethod
+    def _opencode_timeout_bounded(cls, value: int) -> int:
+        if not 1 <= value <= 600:
+            raise ValueError("opencode request_timeout_seconds must be in [1, 600]")
+        return value
+
+    @field_validator("fire_max_concurrent")
+    @classmethod
+    def _opencode_concurrency_bounded(cls, value: int) -> int:
+        if not 1 <= value <= 8:
+            raise ValueError("opencode fire_max_concurrent must be in [1, 8]")
+        return value
+
+    @field_validator("poll_max_output_chars")
+    @classmethod
+    def _opencode_output_bounded(cls, value: int) -> int:
+        if not 1_000 <= value <= 32_000:
+            raise ValueError("opencode poll_max_output_chars must be in [1000, 32000]")
+        return value
+
+
 class OfflineAgencyConfig(BaseModel):
     """Bounded offline learning cycles that run while a worker process is alive."""
 
@@ -883,6 +1008,7 @@ class Settings(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     hdsc: HDSCConfig = Field(default_factory=HDSCConfig)
+    engram: EngramConfig = Field(default_factory=EngramConfig)
     initiative: InitiativeConfig = Field(default_factory=InitiativeConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -897,6 +1023,7 @@ class Settings(BaseModel):
     external_truth: ExternalTruthConfig = Field(default_factory=ExternalTruthConfig)
     firecrawl: FirecrawlConfig = Field(default_factory=FirecrawlConfig)
     multimodal: MultimodalConfig = Field(default_factory=MultimodalConfig)
+    opencode: OpencodeConfig = Field(default_factory=OpencodeConfig)
     offline_agency: OfflineAgencyConfig = Field(default_factory=OfflineAgencyConfig)
     inner_life: InnerLifeConfig = Field(default_factory=InnerLifeConfig)
     emotion_library: EmotionLibraryConfig = Field(default_factory=EmotionLibraryConfig)
@@ -1026,6 +1153,24 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
         set_section("hdsc", "h2_gain_margin", float(env["SSA_H2_GAIN_MARGIN"]))
     if "SSA_H2_MASS_TOLERANCE" in env:
         set_section("hdsc", "h2_mass_tolerance", float(env["SSA_H2_MASS_TOLERANCE"]))
+    if "HDSC_ENGRAM_ENABLED" in env:
+        set_section("engram", "enabled", _parse_bool(env["HDSC_ENGRAM_ENABLED"]))
+    if "HDSC_ENGRAM_MODE" in env:
+        set_section("engram", "mode", env["HDSC_ENGRAM_MODE"])
+    if "HDSC_ENGRAM_MAX_HOPS" in env:
+        set_section("engram", "max_hops", int(env["HDSC_ENGRAM_MAX_HOPS"]))
+    if "HDSC_ENGRAM_RESTART_PROBABILITY" in env:
+        set_section(
+            "engram",
+            "restart_probability",
+            float(env["HDSC_ENGRAM_RESTART_PROBABILITY"]),
+        )
+    if "HDSC_ENGRAM_MAX_ACTIVE" in env:
+        set_section("engram", "max_active", int(env["HDSC_ENGRAM_MAX_ACTIVE"]))
+    if "HDSC_ENGRAM_MAX_RESULTS" in env:
+        set_section("engram", "max_results", int(env["HDSC_ENGRAM_MAX_RESULTS"]))
+    if "HDSC_ENGRAM_GRAPH_LIMIT" in env:
+        set_section("engram", "graph_limit", int(env["HDSC_ENGRAM_GRAPH_LIMIT"]))
     if "SSA_INITIATIVE_DAILY_LIMIT" in env:
         set_section("initiative", "daily_limit", int(env["SSA_INITIATIVE_DAILY_LIMIT"]))
     if "SSA_INITIATIVE_COOLDOWN_MINUTES" in env:
@@ -1170,6 +1315,26 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
         set_section("multimodal", "max_file_bytes", int(env["SSA_MULTIMODAL_MAX_FILE_BYTES"]))
     if "SSA_MULTIMODAL_MAX_TOTAL_BYTES" in env:
         set_section("multimodal", "max_total_bytes", int(env["SSA_MULTIMODAL_MAX_TOTAL_BYTES"]))
+    if "HDSC_OPENCODE_ENABLED" in env:
+        set_section("opencode", "enabled", _parse_bool(env["HDSC_OPENCODE_ENABLED"]))
+    if "HDSC_OPENCODE_BASE_URL" in env:
+        set_section("opencode", "base_url", env["HDSC_OPENCODE_BASE_URL"])
+    if "HDSC_OPENCODE_PROJECT_DIR" in env:
+        set_section("opencode", "project_dir", env["HDSC_OPENCODE_PROJECT_DIR"])
+    if "HDSC_OPENCODE_TIMEOUT_SECONDS" in env:
+        set_section(
+            "opencode", "request_timeout_seconds", int(env["HDSC_OPENCODE_TIMEOUT_SECONDS"])
+        )
+    if "HDSC_OPENCODE_FIRE_MAX_CONCURRENT" in env:
+        set_section(
+            "opencode", "fire_max_concurrent", int(env["HDSC_OPENCODE_FIRE_MAX_CONCURRENT"])
+        )
+    if "HDSC_OPENCODE_POLL_MAX_OUTPUT_CHARS" in env:
+        set_section(
+            "opencode", "poll_max_output_chars", int(env["HDSC_OPENCODE_POLL_MAX_OUTPUT_CHARS"])
+        )
+    if "HDSC_OPENCODE_DEFAULT_MODEL" in env:
+        set_section("opencode", "default_model", env["HDSC_OPENCODE_DEFAULT_MODEL"])
     if "SSA_EMOTION_LIBRARY_ROOT" in env:
         set_section("emotion_library", "library_root", env["SSA_EMOTION_LIBRARY_ROOT"])
     if "SSA_QUIET_HOURS_START" in env:
@@ -1266,6 +1431,7 @@ __all__ = [
     "StateConfig",
     "ThinkingMode",
     "ToolConfig",
+    "WarpedResonanceMode",
     "Win32Config",
     "WorldConfig",
     "load_settings",

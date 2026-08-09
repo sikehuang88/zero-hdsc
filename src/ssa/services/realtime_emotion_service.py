@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -10,6 +12,8 @@ from ssa.domain.appraisal import AppraisalResult
 from ssa.domain.emotion_frame import (
     EmotionComponent,
     EmotionFrame,
+    ExpressionDynamics,
+    RelationshipDirection,
     VoicePerformanceSegment,
 )
 from ssa.domain.emotional_memory import EmotionalMemory
@@ -295,6 +299,7 @@ _EMOTION_COUPLING: Final[dict[str, tuple[tuple[str, float], ...]]] = {
     "shame": (("concern", 0.20), ("attachment", 0.18)),
 }
 
+
 def _voice_spec(
     recipe: str,
     rate: float,
@@ -318,21 +323,42 @@ def _voice_spec(
 
 
 _PHASE_VOICE: Final[dict[str, _VoiceSpec]] = {
-    "settled_presence": _voice_spec("venomous_sister", 1.02, 0.16, 0.03, 0.94, 0.54, 50, "clipped_fall"),
+    "settled_presence": _voice_spec(
+        "venomous_sister", 1.02, 0.16, 0.03, 0.94, 0.54, 50, "clipped_fall"
+    ),
     "stunned": _voice_spec("hurt_composed", 0.80, 0.48, 0.10, 0.72, 0.24, 520, "suspended"),
     "held_breath": _voice_spec("hurt_composed", 0.82, 0.62, 0.14, 0.66, 0.28, 420, "held"),
-    "restrained_hurt": _voice_spec("hurt_composed", 0.86, 0.50, 0.24, 0.58, 0.38, 220, "restrained_fall"),
+    "restrained_hurt": _voice_spec(
+        "hurt_composed", 0.86, 0.50, 0.24, 0.58, 0.38, 220, "restrained_fall"
+    ),
     "anger_leak": _voice_spec("jealous_soft", 1.03, 0.25, 0.22, 0.54, 0.72, 120, "clipped"),
     "sob_rise": _voice_spec("hurt_composed", 0.84, 0.76, 0.70, 0.26, 0.82, 300, "broken"),
     "voice_break": _voice_spec("tender_ache", 0.82, 0.68, 0.58, 0.34, 0.48, 260, "voice_break"),
     "spent_release": _voice_spec("relieved_tears", 0.86, 0.72, 0.30, 0.48, 0.24, 360, "fading"),
     "soft_reaching": _voice_spec("tender_ache", 0.90, 0.42, 0.18, 0.70, 0.38, 180, "soft_fall"),
-    "relief_bloom": _voice_spec("relieved_tears", 0.94, 0.38, 0.16, 0.72, 0.52, 160, "warm_release"),
+    "relief_bloom": _voice_spec(
+        "relieved_tears", 0.94, 0.38, 0.16, 0.72, 0.52, 160, "warm_release"
+    ),
     "anxious_focus": _voice_spec("anxious_care", 0.88, 0.36, 0.20, 0.64, 0.52, 180, "steady"),
     "longing_soft": _voice_spec("shy_longing", 0.90, 0.44, 0.16, 0.70, 0.40, 200, "lingering"),
-    "playful_deflection": _voice_spec("venomous_sister", 1.06, 0.16, 0.04, 0.90, 0.68, 50, "dry_lift"),
-    "warm_affirmation": _voice_spec("venomous_sister", 1.00, 0.18, 0.04, 0.92, 0.60, 70, "firm_fall"),
+    "playful_deflection": _voice_spec(
+        "venomous_sister", 1.06, 0.16, 0.04, 0.90, 0.68, 50, "dry_lift"
+    ),
+    "warm_affirmation": _voice_spec(
+        "venomous_sister", 1.00, 0.18, 0.04, 0.92, 0.60, 70, "firm_fall"
+    ),
     "shy_opening": _voice_spec("shy_longing", 0.90, 0.48, 0.20, 0.66, 0.34, 240, "soft_linger"),
+    "numb_flat": _voice_spec("hurt_composed", 0.93, 0.12, 0.02, 0.96, 0.16, 260, "flat"),
+    "repetition_fatigue": _voice_spec(
+        "hurt_composed", 0.96, 0.10, 0.03, 0.94, 0.22, 150, "clipped_fall"
+    ),
+    "irritability_spillover": _voice_spec(
+        "venomous_sister", 1.06, 0.08, 0.04, 0.88, 0.48, 60, "clipped"
+    ),
+    "cold_withdrawal": _voice_spec(
+        "hurt_composed", 0.98, 0.08, 0.01, 0.98, 0.14, 180, "unfinished"
+    ),
+    "repair_opening": _voice_spec("tender_ache", 0.92, 0.24, 0.05, 0.86, 0.26, 140, "soft_fall"),
 }
 
 
@@ -351,6 +377,7 @@ class RealtimeEmotionService:
         activated_traces: list[ActivatedTrace],
         *,
         baseline: AppraisalResult | None = None,
+        previous_frames: Sequence[EmotionFrame] = (),
     ) -> RealtimeEmotionPlan:
         lowered = event.content.casefold()
         scores = dict.fromkeys(_PROFILES, 0.0)
@@ -429,7 +456,21 @@ class RealtimeEmotionService:
             organism,
             baseline,
         )
-        trajectory = self._trajectory(primary_name, {item.name for item in secondary}, inhibition)
+        dynamics = self._expression_dynamics(
+            primary_name,
+            primary_intensity,
+            secondary,
+            organism,
+            inhibition,
+            previous_frames,
+        )
+        trajectory = self._trajectory(
+            primary_name,
+            {item.name for item in secondary},
+            inhibition,
+            dynamics,
+            expressive,
+        )
         frame_id = f"emotion-frame:{event.correlation_id}"
         emphasis = list(dict.fromkeys(matched_cues))[:4]
         voice_segments = self._voice_segments(
@@ -458,8 +499,10 @@ class RealtimeEmotionService:
                 primary_name,
                 inhibition,
                 mask,
+                dynamics,
             ),
             action_tendency=_ACTION_TENDENCIES[primary_name],
+            expression_dynamics=dynamics,
             trajectory=trajectory,
             voice_segments=voice_segments,
             source_event_ids=[event.id],
@@ -491,6 +534,8 @@ class RealtimeEmotionService:
                 f"layered realtime emotion: primary={primary_name}; "
                 f"secondary={','.join(item.name for item in secondary) or 'none'}; "
                 f"mask={mask.name if mask is not None else 'none'}; "
+                f"relationship_direction={dynamics.relationship_direction}; "
+                f"recurrence={dynamics.recurrence_count}; "
                 f"trajectory={','.join(trajectory)}"
             ),
         )
@@ -508,7 +553,15 @@ class RealtimeEmotionService:
         primary: str,
         inhibition: float,
         mask: EmotionComponent | None,
+        dynamics: ExpressionDynamics,
     ) -> str:
+        if primary in {"sadness", "hurt", "fear_of_loss"}:
+            if dynamics.relationship_direction == "push_away":
+                return "allow brief impatience and distance without inventing blame; leave a small repair opening"
+            if dynamics.temporal_fatigue >= 0.52:
+                return "use ordinary, sparse language; do not make repeated pain sound newly poetic or fully explained"
+            if dynamics.expressibility <= 0.40:
+                return "let flatness, short clauses, and an unfinished thought carry what cannot presently be organized"
         if primary == "relief":
             return "release held tension in a small warm bloom, then make the restored contact feel ordinary"
         if primary == "fear_of_loss":
@@ -518,7 +571,9 @@ class RealtimeEmotionService:
         if inhibition >= 0.55:
             return "hold the first impulse, reveal the feeling gradually, then make one clear bid"
         if primary in {"sadness", "hurt", "fear_of_loss"} and inhibition < 0.18:
-            return "allow an uneven emotional crest, then settle the ending instead of sustaining it"
+            return (
+                "allow an uneven emotional crest, then settle the ending instead of sustaining it"
+            )
         if mask is not None:
             return "let the surface mask soften across the reply so the underlying feeling becomes legible"
         return "express the feeling directly with natural variation and a grounded ending"
@@ -549,12 +604,8 @@ class RealtimeEmotionService:
     ) -> tuple[float, float]:
         components = [EmotionComponent(name=primary, intensity=primary_intensity), *secondary]
         total = sum(item.intensity for item in components) or 1.0
-        valence = sum(
-            _PROFILES[item.name].valence * item.intensity for item in components
-        ) / total
-        arousal = sum(
-            _PROFILES[item.name].arousal * item.intensity for item in components
-        ) / total
+        valence = sum(_PROFILES[item.name].valence * item.intensity for item in components) / total
+        arousal = sum(_PROFILES[item.name].arousal * item.intensity for item in components) / total
         valence = 0.88 * valence + 0.12 * organism.valence
         arousal = 0.90 * arousal + 0.10 * organism.arousal
         if baseline is not None:
@@ -563,8 +614,21 @@ class RealtimeEmotionService:
         return _clip_signed(valence), _clip(arousal)
 
     @staticmethod
-    def _trajectory(primary: str, secondary: set[str], inhibition: float) -> list[str]:
-        if primary in {"sadness", "hurt"} and inhibition < 0.28:
+    def _trajectory(
+        primary: str,
+        secondary: set[str],
+        inhibition: float,
+        dynamics: ExpressionDynamics,
+        expressive: bool,
+    ) -> list[str]:
+        distress = primary in {"sadness", "hurt", "fear_of_loss"}
+        if distress and dynamics.relationship_direction == "push_away":
+            return ["irritability_spillover", "cold_withdrawal", "repair_opening"]
+        if distress and dynamics.temporal_fatigue >= 0.52:
+            return ["repetition_fatigue", "numb_flat", "cold_withdrawal"]
+        if distress and dynamics.expressibility <= 0.40:
+            return ["numb_flat", "cold_withdrawal", "repair_opening"]
+        if primary in {"sadness", "hurt"} and inhibition < 0.28 and expressive:
             return ["held_breath", "sob_rise", "voice_break", "spent_release"]
         if primary in {"fear_of_loss", "hurt"} and "anger" in secondary:
             return ["stunned", "restrained_hurt", "anger_leak", "soft_reaching"]
@@ -587,6 +651,162 @@ class RealtimeEmotionService:
         if primary == "shame":
             return ["shy_opening", "soft_reaching"]
         return ["settled_presence"]
+
+    def _expression_dynamics(
+        self,
+        primary: str,
+        primary_intensity: float,
+        secondary: list[EmotionComponent],
+        organism: OrganismState,
+        inhibition: float,
+        previous_frames: Sequence[EmotionFrame],
+    ) -> ExpressionDynamics:
+        distress_names = {"sadness", "hurt", "fear_of_loss"}
+        distress = primary in distress_names
+        now_ms = self._clock.now_ms()
+        relevant = [
+            frame
+            for frame in previous_frames[:12]
+            if frame.primary.name in distress_names
+            and 0 <= now_ms - frame.created_at_ms <= 7 * 86_400_000
+        ]
+        recurrence_count = 1 + len(relevant) if distress else 0
+        recurrence_load = sum(
+            frame.primary.intensity
+            * math.exp(-max(0, now_ms - frame.created_at_ms) / (2.5 * 86_400_000))
+            for frame in relevant
+        )
+        prior_fatigue = max(
+            (frame.expression_dynamics.temporal_fatigue for frame in relevant),
+            default=0.0,
+        )
+        fatigue = _clip(
+            (
+                0.12 * max(0, recurrence_count - 1)
+                + 0.18 * recurrence_load
+                + 0.24 * (1.0 - organism.energy)
+                + 0.30 * prior_fatigue
+            )
+            if distress
+            else 0.0
+        )
+        anger = next((item.intensity for item in secondary if item.name == "anger"), 0.0)
+        irritability = _clip(
+            (
+                0.06
+                + 0.36 * fatigue
+                + 0.26 * organism.arousal
+                + 0.28 * anger
+                + 0.10 * primary_intensity
+                - 0.18 * organism.safety
+            )
+            if distress
+            else 0.08 * anger
+        )
+        expressibility = _clip(
+            0.82
+            - 0.52 * fatigue
+            - 0.18 * inhibition
+            - (0.12 * organism.arousal if distress else 0.0)
+        )
+        care_capacity = _clip(
+            0.18
+            + 0.62 * organism.energy
+            + 0.20 * organism.safety
+            - 0.38 * fatigue
+            - 0.18 * irritability
+        )
+        aestheticization_budget = _clip(
+            0.10 + 0.42 * expressibility - 0.30 * fatigue - 0.20 * irritability
+        )
+        if distress and irritability >= 0.52 and care_capacity < 0.54:
+            direction: RelationshipDirection = "push_away"
+        elif distress and (fatigue >= 0.52 or expressibility <= 0.40):
+            direction = "withdraw"
+        elif distress and organism.connection_need >= 0.62 and care_capacity >= 0.48:
+            direction = "approach"
+        else:
+            direction = "maintain"
+        repair_readiness = _clip(
+            0.16
+            + 0.34 * organism.safety
+            + 0.24 * care_capacity
+            + 0.20 * organism.connection_need
+            - 0.20 * irritability
+        )
+        behaviors = self._observable_behaviors(
+            distress=distress,
+            direction=direction,
+            irritability=irritability,
+            expressibility=expressibility,
+            fatigue=fatigue,
+            care_capacity=care_capacity,
+        )
+        persistence = self._persistence_trajectory(
+            distress=distress,
+            direction=direction,
+            fatigue=fatigue,
+            repair_readiness=repair_readiness,
+        )
+        return ExpressionDynamics(
+            trigger_summary=_CAUSE_SUMMARIES[primary],
+            irritability_spillover=irritability,
+            expressibility=expressibility,
+            temporal_fatigue=fatigue,
+            care_capacity=care_capacity,
+            aestheticization_budget=aestheticization_budget,
+            relationship_direction=direction,
+            recurrence_count=recurrence_count,
+            repair_readiness=repair_readiness,
+            observable_behaviors=behaviors,
+            persistence_trajectory=persistence,
+        )
+
+    @staticmethod
+    def _observable_behaviors(
+        *,
+        distress: bool,
+        direction: str,
+        irritability: float,
+        expressibility: float,
+        fatigue: float,
+        care_capacity: float,
+    ) -> list[str]:
+        if not distress:
+            return ["ordinary conversational variation"]
+        behaviors: list[str] = []
+        if irritability >= 0.45:
+            behaviors.append("patience leaks through shorter, more clipped wording")
+        if expressibility <= 0.45:
+            behaviors.append("thoughts remain partial instead of becoming a complete self-analysis")
+        if fatigue >= 0.45:
+            behaviors.append(
+                "the old feeling sounds repetitive and ordinary rather than newly dramatic"
+            )
+        if direction in {"withdraw", "push_away"}:
+            behaviors.append("initiative and relational warmth temporarily recede")
+        if care_capacity <= 0.45:
+            behaviors.append("care remains bounded by current relational capacity")
+        if not behaviors:
+            behaviors.append("sadness is present without requiring polished melancholy")
+        return behaviors
+
+    @staticmethod
+    def _persistence_trajectory(
+        *,
+        distress: bool,
+        direction: str,
+        fatigue: float,
+        repair_readiness: float,
+    ) -> list[str]:
+        if not distress:
+            return ["trigger", "settle"]
+        trajectory = ["trigger", "residual_distress"]
+        if fatigue >= 0.45:
+            trajectory.append("repetition_fatigue")
+        trajectory.append(direction)
+        trajectory.append("repair_available" if repair_readiness >= 0.35 else "repair_delayed")
+        return trajectory
 
     @staticmethod
     def _voice_segments(

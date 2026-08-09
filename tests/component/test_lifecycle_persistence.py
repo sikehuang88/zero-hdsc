@@ -62,7 +62,7 @@ def test_lifecycle_migration_and_goal_repository(tmp_path: Path) -> None:
     )
 
     try:
-        assert database.schema_version == 22
+        assert database.schema_version == 25
         assert goals.insert(goal) == goal
         step = GoalStep(
             id="step-1",

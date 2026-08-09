@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ssa.domain.enums import SourceKind
 
@@ -24,6 +25,7 @@ class Trace(BaseModel):
     importance: float
     valence: float
     arousal: float
+    tension: float = 0.0
     is_internal: bool = False
     embedding_model: str
     embedding_dim: int = Field(gt=0)
@@ -37,7 +39,7 @@ class Trace(BaseModel):
             raise ValueError("trace text fields must not be empty")
         return value
 
-    @field_validator("importance", "arousal")
+    @field_validator("importance", "arousal", "tension")
     @classmethod
     def _unit_interval(cls, value: float) -> float:
         if not 0.0 <= value <= 1.0:
@@ -145,6 +147,8 @@ class TraceSpaceSnapshot(BaseModel):
         "awaiting-input"
     )
     shadow_affects_prompt: bool = False
+    warped_mode: Literal["disabled", "shadow", "live"] = "disabled"
+    warped_affects_prompt: bool = False
     stability_audit: TraceSpaceStabilityAudit | None = None
     resonance_audit: ResonanceRecallAudit | None = None
 
@@ -175,6 +179,46 @@ class ResonanceCandidateAudit(BaseModel):
     emerged: bool = False
 
 
+class WarpedResonanceShadowAudit(BaseModel):
+    """Read model for an observational warped free-energy scan."""
+
+    model_id: str
+    mode: Literal["shadow", "live"] = "shadow"
+    evaluated_trace_count: int = Field(ge=1)
+    content_information: float = Field(ge=0.0, le=1.0)
+    affect_mix: float = Field(ge=0.0, le=1.0)
+    temperature: float = Field(gt=0.0)
+    selected_trace_ids: tuple[str, ...]
+    detuning_by_trace_id: dict[str, float]
+    probability_by_trace_id: dict[str, float]
+    surfaced: bool
+    reason: str
+    parameters: dict[str, float]
+
+    @model_validator(mode="after")
+    def _consistent_audit(self) -> WarpedResonanceShadowAudit:
+        detuning_ids = set(self.detuning_by_trace_id)
+        probability_ids = set(self.probability_by_trace_id)
+        if detuning_ids != probability_ids:
+            raise ValueError("warped detuning and probability IDs must align")
+        if detuning_ids and len(detuning_ids) != self.evaluated_trace_count:
+            raise ValueError("warped candidate metrics must cover the evaluated archive")
+        if not set(self.selected_trace_ids) <= detuning_ids:
+            raise ValueError("warped selected traces must belong to the evaluated archive")
+        numeric = (
+            *self.detuning_by_trace_id.values(),
+            *self.probability_by_trace_id.values(),
+            *self.parameters.values(),
+        )
+        if not all(math.isfinite(value) for value in numeric):
+            raise ValueError("warped audit metrics must be finite")
+        if any(value < 0.0 for value in self.detuning_by_trace_id.values()):
+            raise ValueError("warped detuning must be non-negative")
+        if any(not 0.0 <= value <= 1.0 for value in self.probability_by_trace_id.values()):
+            raise ValueError("warped probabilities must be in [0, 1]")
+        return self
+
+
 class ResonanceRecallAudit(BaseModel):
     id: str
     conversation_id: str
@@ -190,6 +234,7 @@ class ResonanceRecallAudit(BaseModel):
     conservation_residual: float
     emerged: bool
     created_at_ms: int = Field(ge=0)
+    warped_shadow: WarpedResonanceShadowAudit | None = None
 
 
 __all__ = [
@@ -202,4 +247,5 @@ __all__ = [
     "TraceNode",
     "TraceSpaceSnapshot",
     "TraceSpaceStabilityAudit",
+    "WarpedResonanceShadowAudit",
 ]

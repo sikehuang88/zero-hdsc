@@ -1641,6 +1641,13 @@ async def test_realtime_turn_persists_layered_emotion_before_streaming_reply(
         assert emotion_event.data["inner_conflict"]
         assert result.emotion_frame is not None
         assert result.emotion_frame.primary.name == "fear_of_loss"
+        assert result.emotion_frame.expression_dynamics.trigger_summary
+        assert emotion_event.data["expression_dynamics"]["relationship_direction"] in {
+            "approach",
+            "maintain",
+            "withdraw",
+            "push_away",
+        }
         assert {item.name for item in result.emotion_frame.secondary} >= {
             "hurt",
             "attachment",
@@ -1688,6 +1695,10 @@ async def test_realtime_turn_persists_layered_emotion_before_streaming_reply(
         assert not [call for call in llm.calls if call.purpose == "appraisal"]
         chat_request = next(call for call in llm.calls if call.purpose == "interactive_chat")
         assert "inner_conflict" in (chat_request.messages[-1].content or "")
+        assert "aestheticization_budget" in (chat_request.messages[-1].content or "")
+        penalties = result.agent_event.metadata["emotion_expression_penalties"]
+        assert penalties["evaluator_version"] == "anti-performance-v1"
+        assert 0.0 <= penalties["total"] <= 1.0
     finally:
         session.close()
 

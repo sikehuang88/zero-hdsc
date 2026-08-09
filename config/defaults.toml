@@ -60,6 +60,27 @@ resonance_affect_weight = 0.25
 resonance_relation_weight = 0.15
 resonance_situation_weight = 0.15
 resonance_arc_weight = 0.10
+warped_resonance_mode = "live"
+warped_resonance_max_nodes = 32
+warped_low_information = 0.12
+warped_high_information = 0.45
+warped_beta = 4.0
+warped_bandwidth = 1.0
+warped_diffusion_time = 0.35
+warped_temperature = 0.15
+warped_recall_count = 5
+warped_detuning_cap = 6.0
+warped_surfacing_margin = 0.25
+
+[engram]
+enabled = false
+mode = "truncated_power"
+max_hops = 3
+restart_probability = 0.20
+epsilon = 0.000001
+max_active = 64
+max_results = 32
+graph_limit = 512
 
 [initiative]
 daily_limit = 3
@@ -174,6 +195,15 @@ max_file_bytes = 20971520
 max_total_bytes = 41943040
 max_text_chars_per_file = 120000
 max_response_bytes = 4194304
+
+[opencode]
+enabled = false
+base_url = "http://127.0.0.1:4096"
+project_dir = ""
+request_timeout_seconds = 120
+fire_max_concurrent = 2
+poll_max_output_chars = 24000
+default_model = "hdsc/deepseek-v4-flash"
 
 [offline_agency]
 enabled = true

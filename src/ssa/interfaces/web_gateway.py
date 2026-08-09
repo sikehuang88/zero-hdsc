@@ -42,6 +42,7 @@ from ssa.config import DatabaseConfig, Settings, load_settings
 from ssa.domain.events import Event
 from ssa.interfaces.coding_workspace_api import coding_workspace_router
 from ssa.interfaces.community_api import community_router
+from ssa.interfaces.opencode_broker import opencode_broker_router
 from ssa.interfaces.relationship_preferences_api import relationship_preferences_router
 from ssa.interfaces.romantic_persona_api import romantic_persona_router
 from ssa.runtime.interactive import (
@@ -777,6 +778,10 @@ def create_app(
         if session is None:
             raise HTTPException(status_code=503, detail="session is still initializing")
         return session
+
+    broker_token = settings.secrets.broker_token.get_secret_value()
+    if broker_token:
+        app.include_router(opencode_broker_router(require_session, broker_token))
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:

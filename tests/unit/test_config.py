@@ -578,6 +578,12 @@ def test_final_k_out_of_range_rejected():
         {"h2_mass_tolerance": 0.0},
         {"h2_gain_margin": 1.0},
         {"h2_score_lipschitz_bound": float("inf")},
+        {"warped_resonance_max_nodes": 1},
+        {"warped_low_information": 0.6, "warped_high_information": 0.4},
+        {"warped_beta": -0.1},
+        {"warped_temperature": 0.0},
+        {"warped_surfacing_margin": -0.1},
+        {"warped_resonance_max_nodes": 2, "warped_recall_count": 3},
     ],
 )
 def test_invalid_h2_configuration_is_rejected(values: dict[str, object]) -> None:

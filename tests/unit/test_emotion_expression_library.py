@@ -38,7 +38,8 @@ def test_recall_selects_complex_ambivalence_without_copying_example() -> None:
 
     assert any(scene.id == "CE-03" for scene in recall.scenes)
     assert "zero to two discourse particles" in context
-    assert "Never copy a scene example" in context
+    assert "coverage references only" in context
+    assert "Never copy, paraphrase, or replay a scene example" in context
     assert "我没有怪你了" not in context
 
 

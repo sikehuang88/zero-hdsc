@@ -12,7 +12,7 @@ import numpy as np
 
 from ssa.adapters.embedding import EmbeddingService
 from ssa.clock import Clock
-from ssa.config import HDSCConfig, RetrievalConfig
+from ssa.config import HDSCConfig, RetrievalConfig, WarpedResonanceMode
 from ssa.domain.appraisal import AppraisalResult
 from ssa.domain.enums import SourceKind
 from ssa.domain.events import Event
@@ -26,6 +26,7 @@ from ssa.domain.traces import (
     TraceNode,
     TraceSpaceSnapshot,
     TraceSpaceStabilityAudit,
+    WarpedResonanceShadowAudit,
 )
 from ssa.hdsc.active_space import (
     MODEL_ID as H2_MODEL_ID,
@@ -52,6 +53,15 @@ from ssa.hdsc.resonance import (
     strongest_paths,
     transport_coupling,
 )
+from ssa.hdsc.warped_retrieval import (
+    MODEL_ID as WARPED_MODEL_ID,
+)
+from ssa.hdsc.warped_retrieval import (
+    AdaptiveWarpedRetriever,
+    WarpedRetrievalConfig,
+    WarpedRetrievalRequest,
+    WarpedRetrievalStrategy,
+)
 from ssa.ids import IdGenerator
 from ssa.storage.trace_repository import SqliteTraceRepository, trace_vec_rowid
 
@@ -63,7 +73,7 @@ _ClosedLoopGate = Literal["not-measured", "conditional-pass", "fail"]
 
 
 class TraceSpaceService:
-    """Reproducible legacy SSA-A0 baseline retained inside HDSC."""
+    """Persistent trace substrate with live H1D recall and shadow challengers."""
 
     def __init__(
         self,
@@ -76,6 +86,7 @@ class TraceSpaceService:
         embedding_model: str,
         embedding_dim: int,
         hdsc_config: HDSCConfig | None = None,
+        warped_retriever: WarpedRetrievalStrategy | None = None,
     ) -> None:
         self._embedding = embedding
         self._repo = repository
@@ -123,6 +134,24 @@ class TraceSpaceService:
         )
         self._resonance_enabled = experimental.resonance_enabled
         self._resonance_audits: dict[str, ResonanceRecallAudit] = {}
+        self._warped_mode = experimental.warped_resonance_mode
+        self._warped_max_nodes = experimental.warped_resonance_max_nodes
+        self._warped_config = WarpedRetrievalConfig(
+            low_information=experimental.warped_low_information,
+            high_information=experimental.warped_high_information,
+            warp_beta=experimental.warped_beta,
+            bandwidth=experimental.warped_bandwidth,
+            diffusion_time=experimental.warped_diffusion_time,
+            temperature=experimental.warped_temperature,
+            recall_count=experimental.warped_recall_count,
+            surfacing_detuning_cap=experimental.warped_detuning_cap,
+            surfacing_margin=experimental.warped_surfacing_margin,
+        )
+        self._warped_retriever = warped_retriever or (
+            AdaptiveWarpedRetriever(self._warped_config)
+            if self._warped_mode != WarpedResonanceMode.DISABLED
+            else None
+        )
 
     def write_turn(
         self,
@@ -130,6 +159,7 @@ class TraceSpaceService:
         agent_event: Event,
         appraisal: AppraisalResult,
         *,
+        tension: float = 0.0,
         advance_shadow: bool = True,
     ) -> Trace:
         """Append one immutable episode trace for a completed interaction."""
@@ -162,6 +192,7 @@ class TraceSpaceService:
             importance=importance,
             valence=appraisal.valence_signal,
             arousal=appraisal.arousal_signal,
+            tension=_clip(tension),
             embedding_model=self._embedding_model,
             embedding_dim=self._embedding_dim,
             vec_rowid=trace_vec_rowid(trace_id),
@@ -313,6 +344,13 @@ class TraceSpaceService:
             [_cosine(query_vector, vector) for vector in embeddings], dtype=np.float64
         )
         semantic_support = np.clip(similarities, 0.0, 1.0)
+        warped_shadow = self._run_warped_evaluation(
+            traces,
+            embeddings,
+            query_vector,
+            semantic_support,
+            recall_state,
+        )
         source = semantic_support.copy()
         if recall_state.origin_intent:
             ages = np.asarray(
@@ -324,18 +362,29 @@ class TraceSpaceService:
         else:
             source[semantic_support < self._resonance_config.min_semantic_support] = 0.0
         if float(source.sum()) <= 0.0:
+            warped_activated = self._apply_warped_live(
+                [],
+                warped_shadow,
+                traces=traces,
+                semantic_support=semantic_support,
+                coupling=np.zeros(len(traces), dtype=np.float64),
+                paths={},
+                now_ms=self._clock.now_ms(),
+                max_total=max_total,
+            )
             self._store_resonance_audit(
                 conversation_id,
                 query_text,
                 recall_state,
                 (),
-                (),
+                tuple(item.trace.id for item in warped_activated),
                 background=self._resonance_config.background_floor,
                 null_mass=1.0,
                 conservation_residual=0.0,
-                emerged=False,
+                emerged=bool(warped_activated),
+                warped_shadow=warped_shadow,
             )
-            return []
+            return warped_activated
         source /= source.sum()
         links = self._repo.links_among([trace.id for trace in traces])
         rates, gains = modulated_rates(traces, links, recall_state)
@@ -427,6 +476,16 @@ class TraceSpaceService:
                     ),
                 )
             )
+        activated = self._apply_warped_live(
+            activated,
+            warped_shadow,
+            traces=traces,
+            semantic_support=semantic_support,
+            coupling=coupling,
+            paths=paths,
+            now_ms=now_ms,
+            max_total=max_total,
+        )
         selected_ids = tuple(item.trace.id for item in activated)
         null_mass = max(0.0, 1.0 - sum(item.coupling_mass for item in activated))
         self._store_resonance_audit(
@@ -441,8 +500,138 @@ class TraceSpaceService:
             emerged=bool(activated),
             hop_budget=hop_budget,
             gains=gains,
+            warped_shadow=warped_shadow,
         )
         return activated
+
+    def _run_warped_evaluation(
+        self,
+        traces: list[Trace],
+        embeddings: list[np.ndarray],
+        query_vector: np.ndarray,
+        semantic_support: np.ndarray,
+        state: RecallState,
+    ) -> WarpedResonanceShadowAudit | None:
+        if (
+            self._warped_mode == WarpedResonanceMode.DISABLED
+            or self._warped_retriever is None
+            or len(traces) < 2
+        ):
+            return None
+        indexes = _bounded_archive_indexes(len(traces), self._warped_max_nodes)
+        selected_traces = [traces[index] for index in indexes]
+        try:
+            request = WarpedRetrievalRequest(
+                trace_ids=tuple(trace.id for trace in selected_traces),
+                embeddings=np.asarray([embeddings[index] for index in indexes], dtype=np.float64),
+                affect=np.asarray(
+                    [
+                        (
+                            traces[index].valence,
+                            traces[index].arousal,
+                            traces[index].tension,
+                        )
+                        for index in indexes
+                    ],
+                    dtype=np.float64,
+                ),
+                spread=np.asarray(
+                    [max(0.05, 1.0 - traces[index].importance) for index in indexes],
+                    dtype=np.float64,
+                ),
+                query_embedding=np.asarray(query_vector, dtype=np.float64),
+                query_affect=(state.valence, state.arousal, state.tension),
+                semantic_similarity=np.asarray(
+                    [semantic_support[index] for index in indexes],
+                    dtype=np.float64,
+                ),
+            )
+            result = self._warped_retriever.scan(request)
+            return WarpedResonanceShadowAudit(
+                model_id=result.model_id,
+                mode=("live" if self._warped_mode == WarpedResonanceMode.LIVE else "shadow"),
+                evaluated_trace_count=len(selected_traces),
+                content_information=result.content_information,
+                affect_mix=result.affect_mix,
+                temperature=result.temperature,
+                selected_trace_ids=result.selected_trace_ids,
+                detuning_by_trace_id=dict(zip(request.trace_ids, result.detuning, strict=True)),
+                probability_by_trace_id=dict(
+                    zip(request.trace_ids, result.probability, strict=True)
+                ),
+                surfaced=result.surfaced,
+                reason=result.reason,
+                parameters=dict(result.parameters),
+            )
+        except Exception as exc:
+            return WarpedResonanceShadowAudit(
+                model_id=WARPED_MODEL_ID,
+                mode=("live" if self._warped_mode == WarpedResonanceMode.LIVE else "shadow"),
+                evaluated_trace_count=len(selected_traces),
+                content_information=0.0,
+                affect_mix=0.0,
+                temperature=self._warped_config.temperature,
+                selected_trace_ids=(),
+                detuning_by_trace_id={},
+                probability_by_trace_id={},
+                surfaced=False,
+                reason=f"{type(exc).__name__}: {exc}",
+                parameters={},
+            )
+
+    def _apply_warped_live(
+        self,
+        baseline: list[ActivatedTrace],
+        evaluation: WarpedResonanceShadowAudit | None,
+        *,
+        traces: list[Trace],
+        semantic_support: np.ndarray,
+        coupling: np.ndarray,
+        paths: dict[str, tuple[str, ...]],
+        now_ms: int,
+        max_total: int,
+    ) -> list[ActivatedTrace]:
+        if (
+            self._warped_mode != WarpedResonanceMode.LIVE
+            or evaluation is None
+            or not evaluation.surfaced
+        ):
+            return baseline
+        trace_indexes = {trace.id: index for index, trace in enumerate(traces)}
+        probabilities = [
+            value for value in evaluation.probability_by_trace_id.values() if value > 0.0
+        ]
+        background = max(1e-12, float(np.median(probabilities)) if probabilities else 0.0)
+        activated: list[ActivatedTrace] = []
+        for trace_id in evaluation.selected_trace_ids[:max_total]:
+            index = trace_indexes.get(trace_id)
+            if index is None:
+                continue
+            trace = traces[index]
+            probability = evaluation.probability_by_trace_id[trace_id]
+            detuning = evaluation.detuning_by_trace_id[trace_id]
+            activated.append(
+                ActivatedTrace(
+                    trace=trace,
+                    rank=len(activated) + 1,
+                    score=probability,
+                    semantic_similarity=float(semantic_support[index]),
+                    freshness=_freshness(trace.created_at_ms, now_ms),
+                    importance_factor=trace.importance,
+                    activation_kind="resonance",
+                    coupling_mass=float(coupling[index]),
+                    detuning=detuning,
+                    damping=1.0 / (1.0 + trace.importance),
+                    resonance_amplitude=probability,
+                    resonance_ratio=probability / background,
+                    path_trace_ids=paths.get(trace_id, ()),
+                    recall_reason=(
+                        "adaptive warped free-energy live; content information "
+                        f"{evaluation.content_information:.3f}"
+                    ),
+                )
+            )
+        return activated or baseline
 
     def _add_typed_links(
         self,
@@ -576,6 +765,7 @@ class TraceSpaceService:
         emerged: bool,
         hop_budget: int | None = None,
         gains: dict[TraceLinkType, float] | None = None,
+        warped_shadow: WarpedResonanceShadowAudit | None = None,
     ) -> None:
         audit = ResonanceRecallAudit(
             id=self._ids.new(),
@@ -592,6 +782,7 @@ class TraceSpaceService:
             conservation_residual=conservation_residual,
             emerged=emerged,
             created_at_ms=self._clock.now_ms(),
+            warped_shadow=warped_shadow,
         )
         self._resonance_audits[conversation_id] = audit
         try:
@@ -662,6 +853,14 @@ class TraceSpaceService:
         if any(item.activation_kind == "resonance" for item in activations.values()):
             activation_model = "hdsc-h1d-resonance-v1"
             serving_model_id = activation_model
+        if (
+            resonance_audit is not None
+            and resonance_audit.warped_shadow is not None
+            and resonance_audit.warped_shadow.mode == "live"
+            and resonance_audit.warped_shadow.surfaced
+        ):
+            activation_model = resonance_audit.warped_shadow.model_id
+            serving_model_id = activation_model
         return TraceSpaceSnapshot(
             nodes=nodes,
             links=self._repo.links_among(trace_ids),
@@ -674,6 +873,8 @@ class TraceSpaceService:
             shadow_model_id=(H2_MODEL_ID if self._h2_enabled else None),
             shadow_status=shadow_status,
             shadow_affects_prompt=False,
+            warped_mode=self._warped_mode.value,
+            warped_affects_prompt=(self._warped_mode == WarpedResonanceMode.LIVE),
             stability_audit=stability_audit,
             resonance_audit=resonance_audit,
         )
@@ -892,6 +1093,16 @@ def _normalize_projection(projected: np.ndarray) -> np.ndarray:
 def _fallback_coordinate(trace_id: str) -> tuple[float, float]:
     digest = hashlib.sha256(trace_id.encode("utf-8")).digest()
     return (0.05 + digest[0] / 255 * 0.90, 0.05 + digest[1] / 255 * 0.90)
+
+
+def _bounded_archive_indexes(count: int, limit: int) -> tuple[int, ...]:
+    """Sample the full chronology deterministically for bounded shadow work."""
+    if count <= 0 or limit <= 0:
+        return ()
+    if count <= limit:
+        return tuple(range(count))
+    positions = np.linspace(0, count - 1, num=limit)
+    return tuple(round(position) for position in positions)
 
 
 def _fixed_hyperplanes(dimension: int, bits: int) -> np.ndarray:

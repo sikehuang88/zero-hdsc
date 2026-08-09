@@ -57,6 +57,7 @@ from ssa.hdsc.resonance import RecallState
 from ssa.ids import IdGenerator, UuidIdGenerator
 from ssa.runtime.autonomous import AutonomousRuntime
 from ssa.services.appraisal_service import AppraisalService
+from ssa.services.emotion_expression_evaluator import evaluate_emotion_expression
 from ssa.services.emotion_expression_library import (
     EmotionExpressionLibrary,
     EmotionExpressionRecall,
@@ -91,7 +92,7 @@ from ssa.tools.kernel import ToolKernel
 from ssa.tools.models import ImageGenerationRoute, ToolAutonomyContext, ToolExecutionResult
 from ssa.tools.soda_music import soda_music_enabled
 
-_CHAT_PROMPT_VERSION = "interactive_chat_v11"
+_CHAT_PROMPT_VERSION = "interactive_chat_v12"
 _LEARNING_BOOTSTRAP_TURNS = 3
 _MAX_PRIVATE_CONTEXT_USER_MESSAGES = 4
 _MAX_TRUNCATION_CONTINUATIONS = 2
@@ -635,6 +636,9 @@ class DigitalLifeSession:
                 firecrawl_config=settings.firecrawl,
                 firecrawl_api_key=firecrawl_key,
                 prediction_service=self._prediction_service,
+                opencode_config=settings.opencode,
+                opencode_server_password=settings.secrets.opencode_server_password.get_secret_value(),
+                opencode_server_username=settings.secrets.opencode_server_username,
             )
             if settings.tools.enabled
             else None
@@ -803,6 +807,21 @@ class DigitalLifeSession:
             ),
         )
 
+    def record_opencode_writeback(self, *, session_id: str, workspace_root: str) -> Event:
+        """Record a delegated session completion without persisting its raw transcript."""
+        return self._append_event(
+            actor=Actor.SYSTEM,
+            event_type="opencode.session_writeback",
+            source_kind=SourceKind.SYSTEM_DERIVED,
+            content="opencode session writeback recorded",
+            correlation_id=f"opencode:{session_id}",
+            metadata={
+                "provider": "opencode",
+                "session_id": session_id,
+                "workspace_root": workspace_root,
+            },
+        )
+
     async def send(
         self,
         content: str,
@@ -852,6 +871,7 @@ class DigitalLifeSession:
                 arousal=organism.arousal,
                 energy=organism.energy,
                 connection_need=organism.connection_need,
+                tension=relationship.tension,
                 situation_mode="reminisce" if origin_intent else "answer",
                 origin_intent=origin_intent,
             )
@@ -885,6 +905,10 @@ class DigitalLifeSession:
                 )
             self._last_trace_query = content
             recall_abstained = origin_intent and not activated_traces
+            warped_live_used = any(
+                item.recall_reason.startswith("adaptive warped free-energy live")
+                for item in activated_traces
+            )
             related_memories = (
                 []
                 if recall_abstained
@@ -947,6 +971,14 @@ class DigitalLifeSession:
                     "workspace_root": workspace_root,
                     "active_skill_ids": list(skill_selection.ids) if skill_selection else [],
                     "activated_trace_ids": [item.trace.id for item in activated_traces],
+                    "warped_retrieval_live": warped_live_used,
+                    "memory_retrieval_model": (
+                        "hdsc-adaptive-warped-free-energy-v1"
+                        if warped_live_used
+                        else "hdsc-h1d-resonance-v1"
+                        if activated_traces
+                        else "none"
+                    ),
                     "memory_recall_abstained": recall_abstained,
                     "expression_forms": [item.form for item in expression_recall.entries],
                     "expression_scene_ids": [item.id for item in expression_recall.scenes],
@@ -969,6 +1001,10 @@ class DigitalLifeSession:
             organism = self._ensure_organism(user_event)
             relationship = self._ensure_relationship(user_event)
             state_summary = _state_summary(organism, relationship)
+            previous_emotion_frames = self._emotion_frames.recent(
+                self.conversation_id,
+                limit=12,
+            )
             if realtime:
                 emotion_plan = self._realtime_emotion.plan(
                     user_event,
@@ -976,6 +1012,7 @@ class DigitalLifeSession:
                     relationship,
                     [item.memory for item in emotional_recalls],
                     activated_traces,
+                    previous_frames=previous_emotion_frames,
                 )
                 appraisal = emotion_plan.appraisal
                 self._appraisals.insert(
@@ -1004,6 +1041,7 @@ class DigitalLifeSession:
                     [item.memory for item in emotional_recalls],
                     activated_traces,
                     baseline=appraisal,
+                    previous_frames=previous_emotion_frames,
                 )
             emotion_frame = self._emotion_frames.insert(emotion_plan.frame)
             await _emit_session_event(
@@ -1127,6 +1165,22 @@ class DigitalLifeSession:
                 )
                 raise RuntimeError("inference provider returned no visible reply after one retry")
 
+            previous_agent_replies = [
+                item.content
+                for item in reversed(
+                    self._events.recent_by_conversation(
+                        self.conversation_id,
+                        limit=12,
+                    )
+                )
+                if item.actor == Actor.AGENT
+            ][:4]
+            expression_penalties = evaluate_emotion_expression(
+                reply,
+                emotion_frame,
+                previous_agent_replies,
+            )
+
             agent_event = self._append_event(
                 actor=Actor.AGENT,
                 event_type="agent.message",
@@ -1141,6 +1195,7 @@ class DigitalLifeSession:
                     "perception_id": stored_perception.id,
                     "situation_mode": perception.primary_mode.value,
                     "emotion_frame_id": emotion_frame.id,
+                    "emotion_expression_penalties": expression_penalties.as_metadata(),
                 },
             )
             self._advance_internal_state(
@@ -1151,6 +1206,7 @@ class DigitalLifeSession:
                 cause=agent_event,
                 intent=_infer_intent(reply),
             )
+            updated_relationship = self._relationships.latest() or relationship
             self._autonomous.observe_agent_event(
                 agent_event,
                 perception,
@@ -1161,6 +1217,7 @@ class DigitalLifeSession:
                 user_event,
                 agent_event,
                 appraisal,
+                tension=updated_relationship.tension,
             )
             self._emotion_library.capture(
                 user_event,
@@ -1597,6 +1654,18 @@ class DigitalLifeSession:
                     "observation_kind": result.metadata.get("observation_kind"),
                     "observed_at_ms": result.metadata.get("observed_at_ms"),
                     "record_count": result.metadata.get("record_count"),
+                }
+            )
+        if result.metadata.get("opencode_delegation") is True:
+            metadata.update(
+                {
+                    "opencode_delegation": True,
+                    "job_id": result.metadata.get("job_id"),
+                    "session_id": result.metadata.get("session_id"),
+                    "project_id": result.metadata.get("project_id"),
+                    "state": result.metadata.get("state"),
+                    "provider": result.metadata.get("provider"),
+                    "export": result.metadata.get("export"),
                 }
             )
         self._append_event(
@@ -2280,14 +2349,19 @@ def _emotion_frame_context(frame: EmotionFrame) -> str:
         "inner_conflict": frame.inner_conflict,
         "regulation_strategy": frame.regulation_strategy,
         "action_tendency": frame.action_tendency,
+        "expression_dynamics": frame.expression_dynamics.model_dump(mode="json"),
         "trajectory": frame.trajectory,
     }
     return (
         "Layered emotion frame (private model-derived control state):\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        + "\nLet the cause, conflict, inhibition, regulation strategy, and trajectory shape "
-        "subtext naturally. Each sentence should advance the trajectory instead of repeating "
-        "the same emotional note. "
+        + "\nTreat this as a state projection, never as a fixed scene or line template. Let the "
+        "trigger, expression capacity, fatigue, care capacity, relationship direction, and "
+        "persistence trajectory shape observable behaviour. Low expressibility permits short, "
+        "flat, partial language; low care capacity permits bounded patience without invented "
+        "blame. Respect the aestheticization budget: distress does not automatically become "
+        "poetic melancholy. Each sentence should advance the trajectory instead of repeating "
+        "the same emotional note. Preserve a later repair opening when the state provides one. "
         "Avoid naming the emotion analysis in the visible reply."
     )
 

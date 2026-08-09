@@ -205,6 +205,7 @@ class EmotionalMemoryService:
                 arousal=state.arousal,
                 energy=state.energy,
                 connection_need=state.connection_need,
+                tension=state.tension,
                 situation_mode=situation_mode,
                 origin_intent=state.origin_intent,
             )

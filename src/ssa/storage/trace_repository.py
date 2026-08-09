@@ -37,9 +37,9 @@ class SqliteTraceRepository:
             INSERT INTO traces (
                 id, conversation_id, correlation_id, input_event_id,
                 output_event_id, content, content_type, source_kind,
-                importance, valence, arousal, is_internal,
+                importance, valence, arousal, is_internal, tension,
                 embedding_model, embedding_dim, vec_rowid, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace.id,
@@ -54,6 +54,7 @@ class SqliteTraceRepository:
                 trace.valence,
                 trace.arousal,
                 int(trace.is_internal),
+                trace.tension,
                 trace.embedding_model,
                 trace.embedding_dim,
                 trace.vec_rowid,
@@ -329,8 +330,8 @@ class SqliteTraceRepository:
                 id, conversation_id, query_digest, situation_mode, hop_budget,
                 edge_gains_json, candidate_audits_json, selected_trace_ids_json,
                 background_median, emergence_ratio, null_mass,
-                conservation_residual, emerged, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                conservation_residual, emerged, created_at_ms, warped_shadow_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 audit.id,
@@ -354,6 +355,15 @@ class SqliteTraceRepository:
                 audit.conservation_residual,
                 int(audit.emerged),
                 audit.created_at_ms,
+                (
+                    json.dumps(
+                        audit.warped_shadow.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    if audit.warped_shadow is not None
+                    else None
+                ),
             ),
         )
         return audit
@@ -385,6 +395,11 @@ class SqliteTraceRepository:
             conservation_residual=float(row["conservation_residual"]),
             emerged=bool(row["emerged"]),
             created_at_ms=int(row["created_at_ms"]),
+            warped_shadow=(
+                json.loads(str(row["warped_shadow_json"]))
+                if row["warped_shadow_json"] is not None
+                else None
+            ),
         )
 
     def embedding(self, trace: Trace) -> list[float] | None:
@@ -427,6 +442,7 @@ class SqliteTraceRepository:
             importance=float(data["importance"]),
             valence=float(data["valence"]),
             arousal=float(data["arousal"]),
+            tension=float(data["tension"]),
             is_internal=bool(data["is_internal"]),
             embedding_model=str(data["embedding_model"]),
             embedding_dim=int(data["embedding_dim"]),

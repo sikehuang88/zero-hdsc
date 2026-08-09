@@ -38,6 +38,11 @@ from ssa.hdsc.directed_transport import (
     directed_generator,
     propagate_directed,
 )
+from ssa.hdsc.engram_transport import (
+    EngramTransportConfig,
+    EngramTransportError,
+    propagate_engram,
+)
 from ssa.hdsc.hypervector import (
     PackedHypervector,
     bipolar_dot,
@@ -157,6 +162,16 @@ from ssa.hdsc.variation import (
     mutate_param,
     mutate_point,
 )
+from ssa.hdsc.warped import WarpParameters, build_warped_conductance
+from ssa.hdsc.warped_retrieval import (
+    AdaptiveWarpedRetriever,
+    WarpedRetrievalConfig,
+    WarpedRetrievalRequest,
+    WarpedRetrievalResult,
+    WarpedRetrievalStrategy,
+    adaptive_warp_parameters,
+    query_content_information,
+)
 
 __all__ = [
     "AFF",
@@ -182,6 +197,7 @@ __all__ = [
     "SEOS_CLAIM_LEVEL",
     "SEOS_MODEL_ID",
     "SUPPORT_METRIC",
+    "AdaptiveWarpedRetriever",
     "ArchiveConfig",
     "ArchiveEntry",
     "ArchivedEvent",
@@ -191,6 +207,8 @@ __all__ = [
     "Coll",
     "Diff",
     "EffectBoundaryError",
+    "EngramTransportConfig",
+    "EngramTransportError",
     "EpisodeConfig",
     "ExecBudget",
     "ExecContext",
@@ -230,7 +248,13 @@ __all__ = [
     "StaticBudgetReport",
     "Ty",
     "VariationError",
+    "WarpParameters",
+    "WarpedRetrievalConfig",
+    "WarpedRetrievalRequest",
+    "WarpedRetrievalResult",
+    "WarpedRetrievalStrategy",
     "Z",
+    "adaptive_warp_parameters",
     "allocate_source_mass",
     "apply_random_variation",
     "assert_no_future",
@@ -241,6 +265,7 @@ __all__ = [
     "build_episodes",
     "build_primitive_registry",
     "build_semantic_conductance",
+    "build_warped_conductance",
     "bundle_hypervector",
     "check_linearity",
     "crossover_subgraph",
@@ -263,6 +288,8 @@ __all__ = [
     "program_digest",
     "propagate",
     "propagate_directed",
+    "propagate_engram",
+    "query_content_information",
     "run_shadow",
     "semantic_random",
     "similarity",
