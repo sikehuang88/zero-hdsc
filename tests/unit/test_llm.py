@@ -69,12 +69,14 @@ def test_chat_message_assistant_supports_reasoning_and_tool_calls():
     assert message.tool_calls[0].type == "function"
 
 
-def test_tool_call_parser_accepts_compatible_object_arguments_and_missing_fields():
+def test_tool_call_parser_accepts_object_arguments_with_required_envelope_fields():
     from ssa.adapters.llm import _parse_tool_calls
 
     calls = _parse_tool_calls(
         [
             {
+                "id": "call-compatible",
+                "type": "function",
                 "function": {
                     "name": "win32_drives",
                     "arguments": {"include_network": False},
@@ -84,7 +86,7 @@ def test_tool_call_parser_accepts_compatible_object_arguments_and_missing_fields
     )
 
     assert len(calls) == 1
-    assert calls[0].id.startswith("tool-")
+    assert calls[0].id == "call-compatible"
     assert calls[0].type == "function"
     assert json.loads(calls[0].function.arguments) == {"include_network": False}
 

@@ -154,8 +154,8 @@ async def test_autonomous_runtime_converges_across_24_virtual_hours(tmp_path: Pa
             FROM scheduled_jobs
             """
         ).fetchone()
-        assert job_counts["total"] == 14
-        assert job_counts["unique_keys"] == 14
+        assert job_counts["total"] == 15
+        assert job_counts["unique_keys"] == 15
 
         outbox_counts = database.connection.execute(
             """
@@ -224,11 +224,11 @@ async def test_autonomous_runtime_converges_across_24_virtual_hours(tmp_path: Pa
             clock=clock,
             embedding=embedding,
         )
-        assert len(restarted.bootstrap()) == 14
+        assert len(restarted.bootstrap()) == 15
         restart_job_count = database.connection.execute(
             "SELECT COUNT(*) AS c FROM scheduled_jobs"
         ).fetchone()["c"]
-        assert restart_job_count == 14
+        assert restart_job_count == 15
         assert (
             restarted.reflective_service.schedule_reflections(
                 conversation_id,

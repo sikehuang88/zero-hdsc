@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -150,9 +151,7 @@ def read_workspace_file(
     try:
         content = payload.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise CodingWorkspaceBinaryError(
-            f"file is not valid UTF-8 text: {target.name}"
-        ) from exc
+        raise CodingWorkspaceBinaryError(f"file is not valid UTF-8 text: {target.name}") from exc
     return {
         "root": str(root),
         "path": target.relative_to(root).as_posix(),
@@ -195,6 +194,12 @@ def write_workspace_file(
         with suppress(OSError):
             temporary.unlink()
     stat = target.stat()
+    if stat.st_mtime_ns <= current.st_mtime_ns:
+        # Some Windows filesystems coalesce rapid replaces. Preserve the optimistic
+        # concurrency contract by making a successful write observably newer.
+        next_mtime_ns = max(time.time_ns(), current.st_mtime_ns + 1_000_000)
+        os.utime(target, ns=(stat.st_atime_ns, next_mtime_ns))
+        stat = target.stat()
     return {
         "root": str(root),
         "path": target.relative_to(root).as_posix(),

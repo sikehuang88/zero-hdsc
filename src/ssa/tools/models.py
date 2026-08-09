@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+
+from ssa.domain.predictions import EventMatchVerifierSpec, PredictionClaimKind
 
 FirecrawlSource = Literal["web", "news", "images"]
 
@@ -106,6 +108,30 @@ class WriteFileArguments(BaseModel):
         if not value.strip():
             raise ValueError("value must not be empty")
         return value
+
+
+class GroundedPredictionArguments(BaseModel):
+    claim_text: str = Field(min_length=1, max_length=2_000)
+    claim_kind: PredictionClaimKind
+    verifier_spec: EventMatchVerifierSpec
+    stated_confidence: float = Field(ge=0.0, le=1.0)
+    base_rate_prior: float = Field(default=0.5, ge=0.0, le=1.0)
+    resolve_after_minutes: int = Field(ge=1, le=525_600)
+    expires_after_minutes: int = Field(ge=2, le=1_051_200)
+
+    @field_validator("claim_text")
+    @classmethod
+    def _claim_not_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("prediction claim must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def _window_is_ordered(self) -> GroundedPredictionArguments:
+        if self.expires_after_minutes <= self.resolve_after_minutes:
+            raise ValueError("prediction expiry must follow its resolution start")
+        return self
 
 
 class CodingProjectTreeArguments(BaseModel):
@@ -275,6 +301,27 @@ class SodaMusicSearchPlayArguments(BaseModel):
         return value.strip()
 
 
+class MineradioNoArguments(BaseModel):
+    pass
+
+
+class MineradioControlArguments(BaseModel):
+    action: Literal["play", "pause", "toggle", "next", "previous"]
+
+
+class MineradioSearchPlayArguments(BaseModel):
+    query: str = Field(min_length=1, max_length=200)
+    provider: Literal["auto", "netease", "qq", "kugou", "qishui"] = "auto"
+    quality: Literal["standard", "higher", "exhigh", "lossless", "hires"] = "standard"
+
+    @field_validator("query")
+    @classmethod
+    def _mineradio_query_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be blank")
+        return value.strip()
+
+
 class AskGPTArguments(BaseModel):
     prompt: str = Field(min_length=1, max_length=32_000)
     instructions: str = Field(default="", max_length=4_000)
@@ -354,8 +401,12 @@ __all__ = [
     "CodingSearchArguments",
     "FirecrawlScrapeArguments",
     "FirecrawlSearchArguments",
+    "GroundedPredictionArguments",
     "ImageGenerationArguments",
     "ImageGenerationRoute",
+    "MineradioControlArguments",
+    "MineradioNoArguments",
+    "MineradioSearchPlayArguments",
     "PowerShellArguments",
     "ReadFileArguments",
     "SodaMusicControlArguments",

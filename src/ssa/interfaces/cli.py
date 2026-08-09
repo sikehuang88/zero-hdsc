@@ -10,6 +10,10 @@ from collections.abc import Sequence
 from importlib.util import find_spec
 
 from ssa.config import DatabaseConfig, Environment, Settings, load_settings
+from ssa.services.emotion_expression_library import (
+    EmotionExpressionLibrary,
+    resolve_emotion_expression_root,
+)
 from ssa.storage.database import Database
 
 
@@ -135,6 +139,20 @@ def _doctor(settings: Settings) -> int:
             "Win32 tools: "
             f"{'enabled' if settings.win32.enabled and os.name == 'nt' else 'disabled'}"
             f" (clipboard={'on' if settings.win32.clipboard_enabled else 'off'})"
+        )
+        expression_root = resolve_emotion_expression_root(
+            settings.emotion_library.effective_library_root
+        )
+        expression_library = EmotionExpressionLibrary(expression_root)
+        print(
+            "Emotion lib: "
+            f"{expression_root} "
+            f"({'present' if expression_root.is_dir() else 'missing'}; "
+            f"scenes={expression_library.scene_count}; entries={expression_library.entry_count})"
+        )
+        print(
+            "Soda music: "
+            f"{'available' if find_spec('websockets') else 'unavailable (add web extra)'}"
         )
         print("Status:      ok")
         return 0

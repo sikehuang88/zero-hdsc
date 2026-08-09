@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -12,8 +13,9 @@ from pydantic import BaseModel
 from ssa.adapters.llm import FunctionCall, ToolCall
 from ssa.config import FirecrawlConfig, MultimodalConfig, ToolConfig, Win32Config
 from ssa.tools.executors import GlobalToolExecutor, build_default_tool_kernel
+from ssa.tools.mineradio import MineradioExecutor
 from ssa.tools.models import ToolAutonomyContext
-from ssa.tools.soda_music import _query_match_score
+from ssa.tools.soda_music import _query_match_score, soda_music_enabled
 
 
 class _NoArguments(BaseModel):
@@ -44,17 +46,16 @@ def _call(call_id: str, name: str, arguments: dict[str, object]) -> ToolCall:
 def test_default_registry_exposes_stable_global_capabilities() -> None:
     kernel = build_default_tool_kernel(ToolConfig())
 
-    assert kernel.registry.names == (
+    expected = (
         "coding_git_status",
         "coding_project_tree",
         "coding_search",
         "generate_image",
+        "mineradio_control",
+        "mineradio_search_play",
+        "mineradio_status",
         "powershell",
         "read_file",
-        "soda_music_control",
-        "soda_music_login_status",
-        "soda_music_now_playing",
-        "soda_music_search_play",
         "truth_geocode",
         "truth_holidays",
         "truth_music",
@@ -71,34 +72,16 @@ def test_default_registry_exposes_stable_global_capabilities() -> None:
         "web_tabs",
         "write_file",
     )
+    if os.name == "nt" and soda_music_enabled() and find_spec("websockets") is not None:
+        expected = expected[:9] + (
+            "soda_music_control",
+            "soda_music_login_status",
+            "soda_music_now_playing",
+            "soda_music_search_play",
+        ) + expected[9:]
+    assert kernel.registry.names == expected
     definitions = kernel.definitions()
-    assert [item["function"]["name"] for item in definitions] == [
-        "coding_git_status",
-        "coding_project_tree",
-        "coding_search",
-        "generate_image",
-        "powershell",
-        "read_file",
-        "soda_music_control",
-        "soda_music_login_status",
-        "soda_music_now_playing",
-        "soda_music_search_play",
-        "truth_geocode",
-        "truth_holidays",
-        "truth_music",
-        "truth_news",
-        "truth_radio",
-        "truth_service_status",
-        "truth_sun_times",
-        "truth_translate",
-        "truth_weather",
-        "web_close",
-        "web_open",
-        "web_read",
-        "web_search",
-        "web_tabs",
-        "write_file",
-    ]
+    assert [item["function"]["name"] for item in definitions] == list(expected)
     assert all(item["function"]["parameters"]["type"] == "object" for item in definitions)
     assert all(
         item["function"]["parameters"]["additionalProperties"] is False for item in definitions
@@ -141,6 +124,53 @@ def test_soda_music_query_match_score(
     expected: int,
 ) -> None:
     assert _query_match_score(query, state) == expected
+
+
+def test_mineradio_normalizes_provider_ids_without_cross_provider_fallback() -> None:
+    kugou = MineradioExecutor._normalize_track(
+        "kugou",
+        {
+            "id": "track-id",
+            "name": "晴天",
+            "artist": "周杰伦",
+            "hash": "HASH",
+            "albumId": "966846",
+            "albumAudioId": "32100650",
+        },
+    )
+    qq = MineradioExecutor._normalize_track(
+        "qq",
+        {"id": "001", "name": "晴天", "artist": "周杰伦"},
+    )
+
+    assert kugou["provider_ids"]["hash"] == "HASH"
+    assert kugou["provider_ids"]["album_id"] == "966846"
+    assert kugou["provider_ids"]["album_audio_id"] == "32100650"
+    assert qq["provider_ids"]["hash"] == ""
+
+
+def test_mineradio_public_playback_exposes_only_local_audio_proxy() -> None:
+    playback = MineradioExecutor._public_playback(
+        {
+            "provider": "netease",
+            "playable": True,
+            "url": "https://media.example/audio.mp3?token=secret value",
+            "quality": "higher",
+        }
+    )
+
+    assert playback == {
+        "playable": True,
+        "provider": "netease",
+        "trial": False,
+        "reason": "",
+        "message": "",
+        "audio_path": (
+            "/mineradio/api/audio?url="
+            "https%3A%2F%2Fmedia.example%2Faudio.mp3%3Ftoken%3Dsecret%20value"
+        ),
+        "quality": "higher",
+    }
 
 
 @pytest.mark.asyncio

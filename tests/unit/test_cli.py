@@ -32,7 +32,7 @@ def test_cli_init_and_doctor(
 
     assert main(["init-db", "--database", str(database_path)]) == 0
     assert database_path.exists()
-    assert "schema v17" in capsys.readouterr().out
+    assert "schema v21" in capsys.readouterr().out
 
     settings = Settings(database=DatabaseConfig(path=str(database_path)))
     monkeypatch.setattr(
@@ -43,7 +43,7 @@ def test_cli_init_and_doctor(
 
     assert main(["doctor"]) == 0
     output = capsys.readouterr().out
-    assert "Schema:      v17" in output
+    assert "Schema:      v21" in output
     assert "sqlite-vec:  loaded" in output
     assert "LLM main: deepseek/deepseek-v4-flash" in output
     assert "LLM reasoning: deepseek/deepseek-v4-pro" in output
@@ -55,6 +55,8 @@ def test_cli_init_and_doctor(
     assert "MM secret:   not set" in output
     expected_win32 = "enabled" if os.name == "nt" else "disabled"
     assert f"Win32 tools: {expected_win32} (clipboard=on)" in output
+    assert "Emotion lib:" in output
+    assert "Soda music:" in output
 
 
 def test_cli_launches_one_shot_worker(monkeypatch: pytest.MonkeyPatch) -> None:

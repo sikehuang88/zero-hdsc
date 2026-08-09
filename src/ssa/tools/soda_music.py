@@ -14,8 +14,6 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
-from websockets.asyncio.server import serve
-
 from ssa.tools.models import (
     SodaMusicControlArguments,
     SodaMusicNoArguments,
@@ -27,6 +25,23 @@ from ssa.tools.registry import ToolCapability, ToolRegistry
 
 _SODA_SESSION_NAME = "汽水音乐"
 _DEFAULT_SODA_EXE = Path(r"E:\汽水\Soda Music\3.5.1\SodaMusic.exe")
+_SODA_ENABLE_ENV = "HDSC_SODA_MUSIC_ENABLED"
+_TRUTHY = {"1", "true", "yes", "on", "enabled"}
+_LEGACY_NOTE = (
+    "Legacy fallback: Mineradio (mineradio_*) is the primary music backend. "
+    "This tool drives the separately installed Soda Music desktop client and is only "
+    "registered when HDSC_SODA_MUSIC_ENABLED is set. "
+)
+
+
+def soda_music_enabled() -> bool:
+    """Opt-in switch for the legacy Soda Music path.
+
+    Mineradio is the primary backend and covers the same providers over HTTP.
+    This path injects into a separately installed desktop client whose executable
+    path is version-pinned, so it stays off unless explicitly asked for.
+    """
+    return os.environ.get(_SODA_ENABLE_ENV, "").strip().lower() in _TRUTHY
 _MEDIA_KEYS = {
     "play": 0xB3,
     "pause": 0xB3,
@@ -261,12 +276,14 @@ class SodaMusicExecutor:
         self._bridge_activation_attempted = False
 
     def register_into(self, registry: ToolRegistry) -> None:
+        if not soda_music_enabled():
+            return
         registry.register(
             ToolCapability(
                 name="soda_music_now_playing",
                 description=(
-                    "Read the real current track, artist, playback state, and timeline from "
-                    "the Soda Music Windows media session."
+                    _LEGACY_NOTE + "Read the real current track, artist, playback state, "
+                    "and timeline from the Soda Music Windows media session."
                 ),
                 arguments_model=SodaMusicNoArguments,
                 handler=self.now_playing,
@@ -276,8 +293,8 @@ class SodaMusicExecutor:
             ToolCapability(
                 name="soda_music_login_status",
                 description=(
-                    "Read whether the Soda Music desktop account is currently logged in "
-                    "through its existing renderer session."
+                    _LEGACY_NOTE + "Read whether the Soda Music desktop account is currently "
+                    "logged in through its existing renderer session."
                 ),
                 arguments_model=SodaMusicNoArguments,
                 handler=self.login_status_tool,
@@ -287,8 +304,8 @@ class SodaMusicExecutor:
             ToolCapability(
                 name="soda_music_control",
                 description=(
-                    "Control Soda Music playback with play, pause, toggle, next, previous, "
-                    "volume_up, volume_down, or mute."
+                    _LEGACY_NOTE + "Control Soda Music playback with play, pause, toggle, "
+                    "next, previous, volume_up, volume_down, or mute."
                 ),
                 arguments_model=SodaMusicControlArguments,
                 handler=self.control,
@@ -298,8 +315,9 @@ class SodaMusicExecutor:
             ToolCapability(
                 name="soda_music_search_play",
                 description=(
-                    "Open Soda Music, search for a requested song or artist, verify candidates "
-                    "against the Windows media session, and return the actual selected version."
+                    _LEGACY_NOTE + "Open Soda Music, search for a requested song or artist, "
+                    "verify candidates against the Windows media session, and return the "
+                    "actual selected version."
                 ),
                 arguments_model=SodaMusicSearchPlayArguments,
                 handler=self.search_play,
@@ -505,6 +523,8 @@ class SodaMusicExecutor:
         except TimeoutError:
             return {"ok": False, "error": "Soda renderer IPC bridge is busy"}
         try:
+            from websockets.asyncio.server import serve
+
             try:
                 async with serve(
                     bridge_handler,

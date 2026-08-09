@@ -287,6 +287,7 @@ def test_policy_outcome_confirms_or_rolls_back(
         assert experiment is not None
         clock.set_ms(experiment.due_at_ms)
         _event(setup, feedback)
+        _event(setup, feedback)
 
         evaluated = service.evaluate_outcomes("conversation-1")
 
@@ -301,6 +302,47 @@ def test_policy_outcome_confirms_or_rolls_back(
             assert "confirmed proposal" in context
         else:
             assert policy.id not in context
+    finally:
+        database.close()
+
+
+def test_policy_outcome_with_insufficient_confidence_stays_running(tmp_path: Path) -> None:
+    setup = _setup(tmp_path)
+    database = setup["database"]
+    service = setup["service"]
+    learning = setup["learning"]
+    clock = setup["clock"]
+    assert isinstance(database, Database)
+    assert isinstance(service, ReflectiveLearningService)
+    assert isinstance(learning, SqliteLearningRepository)
+    assert isinstance(clock, FrozenClock)
+    try:
+        _seed_artifact(setup)
+        service.schedule_reflections(
+            "conversation-1",
+            OrganismState.initial(clock.now_ms()),
+            RelationshipState.initial(clock.now_ms()),
+            [],
+        )
+        service.consolidate("conversation-1")
+        policy = learning.list_proposals(
+            "conversation-1",
+            {LearningProposalStatus.UNDER_TEST},
+            proposal_type=LearningProposalType.POLICY_PROPOSAL,
+        )[0]
+        experiment = learning.get_experiment(policy.target_id or "")
+        assert experiment is not None
+        clock.set_ms(experiment.due_at_ms)
+        _event(setup, "我刚才没说清楚")
+
+        evaluated = service.evaluate_outcomes("conversation-1")
+
+        assert evaluated.outcomes[0].observation_kind.value == "inconclusive"
+        assert evaluated.experiments[0].status.value == "running"
+        updated = learning.get_proposal(policy.id)
+        assert updated is not None
+        assert updated.status == LearningProposalStatus.UNDER_TEST
+        assert len(learning.decisions_for_proposal(policy.id)) == 1
     finally:
         database.close()
 

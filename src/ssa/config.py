@@ -17,7 +17,7 @@ import re
 import tomllib
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -50,6 +50,7 @@ class Secrets(BaseModel):
     """API keys and passwords. Never serialized to disk."""
 
     llm_api_key: SecretStr = SecretStr("")
+    anthropic_auth_token: SecretStr = SecretStr("")
     multimodal_api_key: SecretStr = SecretStr("")
     firecrawl_api_key: SecretStr = SecretStr("")
     telegram_bot_token: SecretStr = SecretStr("")
@@ -67,6 +68,11 @@ class Secrets(BaseModel):
                 env.get("HDSC_LLM_API_KEY")
                 or env.get("SSA_LLM_API_KEY")
                 or env.get("DEEPSEEK_API_KEY", "")
+            ),
+            anthropic_auth_token=SecretStr(
+                env.get("HDSC_ANTHROPIC_AUTH_TOKEN")
+                or env.get("SSA_ANTHROPIC_AUTH_TOKEN")
+                or env.get("ANTHROPIC_AUTH_TOKEN", "")
             ),
             multimodal_api_key=SecretStr(
                 env.get("HDSC_MULTIMODAL_API_KEY")
@@ -126,6 +132,7 @@ class LLMConfig(BaseModel):
     reasoning_model: str = "deepseek/deepseek-v4-pro"
     base_url: str = "https://api.deepseek.com"
     beta_base_url: str = "https://api.deepseek.com/beta"
+    anthropic_base_url: str | None = None
     temperature: float | None = 0.8
     top_p: float | None = None
     max_tokens: int = 1024
@@ -136,26 +143,19 @@ class LLMConfig(BaseModel):
     reasoning_effort: ReasoningEffort = ReasoningEffort.HIGH
     user_id: str = "hdsc-primary"
 
-    _V4_MODELS: ClassVar[set[str]] = {
-        "deepseek/deepseek-v4-flash",
-        "deepseek/deepseek-v4-pro",
-        # Anthropic-format channel ids (e.g. newapi gateways exposing /v1/messages)
-        "anthropic/DeepSeek-V4-Flash",
-        "anthropic/DeepSeek-V4-Pro",
-    }
-
     @field_validator("model", "reasoning_model")
     @classmethod
-    def _check_v4_model(cls, v: str) -> str:
-        if v not in cls._V4_MODELS:
-            raise ValueError(
-                "DeepSeek V4 model must be deepseek/deepseek-v4-flash or deepseek/deepseek-v4-pro"
-            )
+    def _check_model_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("model id must not be empty")
         return v
 
-    @field_validator("base_url", "beta_base_url")
+    @field_validator("base_url", "beta_base_url", "anthropic_base_url")
     @classmethod
-    def _check_base_url(cls, v: str) -> str:
+    def _check_base_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         normalized = v.rstrip("/")
         parsed = urlsplit(normalized)
         if (
@@ -727,7 +727,8 @@ class EmotionLibraryConfig(BaseModel):
     candidate_limit: int = 240
     recency_half_life_days: float = 45.0
     backfill_limit: int = 500
-    expression_library_path: str = "emotion-value-library"
+    library_root: str = "emotion-value-library"
+    expression_library_path: str | None = None
     expression_entry_limit: int = 5
     expression_scene_limit: int = 2
 
@@ -743,13 +744,20 @@ class EmotionLibraryConfig(BaseModel):
             raise ValueError("emotion-library recency_half_life_days must be in [1, 3650]")
         if not 0 <= self.backfill_limit <= 10_000:
             raise ValueError("emotion-library backfill_limit must be in [0, 10000]")
-        if not self.expression_library_path.strip():
+        if not self.library_root.strip():
+            raise ValueError("emotion-library library_root must not be empty")
+        if self.expression_library_path is not None and not self.expression_library_path.strip():
             raise ValueError("emotion-library expression_library_path must not be empty")
         if not 1 <= self.expression_entry_limit <= 12:
             raise ValueError("emotion-library expression_entry_limit must be in [1, 12]")
         if not 0 <= self.expression_scene_limit <= 6:
             raise ValueError("emotion-library expression_scene_limit must be in [0, 6]")
         return self
+
+    @property
+    def effective_library_root(self) -> str:
+        """Configured root, preserving the pre-v0.5 field as a compatibility alias."""
+        return self.expression_library_path or self.library_root
 
 
 class ReflectiveLearningConfig(BaseModel):
@@ -764,6 +772,7 @@ class ReflectiveLearningConfig(BaseModel):
     min_evidence_count: int = 1
     experiment_duration_hours: int = 6
     experiment_min_observations: int = 1
+    min_outcome_confidence: float = 1.2
     max_runs_per_cycle: int = 4
     max_proposals_per_cycle: int = 8
     policy_experiments_enabled: bool = True
@@ -787,6 +796,8 @@ class ReflectiveLearningConfig(BaseModel):
             raise ValueError("experiment_duration_hours must be in [1, 720]")
         if not 1 <= self.experiment_min_observations <= 100:
             raise ValueError("experiment_min_observations must be in [1, 100]")
+        if not 0.1 <= self.min_outcome_confidence <= 100.0:
+            raise ValueError("min_outcome_confidence must be in [0.1, 100]")
         if not 1 <= self.max_runs_per_cycle <= 32:
             raise ValueError("max_runs_per_cycle must be in [1, 32]")
         if not 1 <= self.max_proposals_per_cycle <= 64:
@@ -924,6 +935,10 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
         set_section("llm", "base_url", env["SSA_LLM_BASE_URL"])
     if "SSA_LLM_BETA_BASE_URL" in env:
         set_section("llm", "beta_base_url", env["SSA_LLM_BETA_BASE_URL"])
+    if "SSA_LLM_ANTHROPIC_BASE_URL" in env:
+        set_section("llm", "anthropic_base_url", env["SSA_LLM_ANTHROPIC_BASE_URL"])
+    elif "ANTHROPIC_BASE_URL" in env:
+        set_section("llm", "anthropic_base_url", env["ANTHROPIC_BASE_URL"])
     if "SSA_LLM_TEMPERATURE" in env:
         set_section("llm", "temperature", float(env["SSA_LLM_TEMPERATURE"]))
     if "SSA_LLM_TOP_P" in env:
@@ -997,6 +1012,12 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
             "identity",
             "review_window_events",
             int(env["SSA_IDENTITY_REVIEW_WINDOW_EVENTS"]),
+        )
+    if "SSA_MIN_OUTCOME_CONFIDENCE" in env:
+        set_section(
+            "reflective_learning",
+            "min_outcome_confidence",
+            float(env["SSA_MIN_OUTCOME_CONFIDENCE"]),
         )
     if "SSA_TOOLS_ENABLED" in env:
         set_section("tools", "enabled", _parse_bool(env["SSA_TOOLS_ENABLED"]))
@@ -1114,6 +1135,8 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
         set_section("multimodal", "max_file_bytes", int(env["SSA_MULTIMODAL_MAX_FILE_BYTES"]))
     if "SSA_MULTIMODAL_MAX_TOTAL_BYTES" in env:
         set_section("multimodal", "max_total_bytes", int(env["SSA_MULTIMODAL_MAX_TOTAL_BYTES"]))
+    if "SSA_EMOTION_LIBRARY_ROOT" in env:
+        set_section("emotion_library", "library_root", env["SSA_EMOTION_LIBRARY_ROOT"])
     if "SSA_QUIET_HOURS_START" in env:
         set_section("initiative", "quiet_hours_start", env["SSA_QUIET_HOURS_START"])
     if "SSA_QUIET_HOURS_END" in env:

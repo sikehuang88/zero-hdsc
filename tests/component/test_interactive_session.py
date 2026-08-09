@@ -30,6 +30,7 @@ from ssa.domain.enums import Actor, SourceKind
 from ssa.domain.events import Event, compute_content_hash
 from ssa.domain.lifecycle import InnerLifeMode
 from ssa.domain.relationship_preferences import RelationshipPreferences, RelationshipSupportMode
+from ssa.domain.romantic_persona import AffectionStyle, RomanticPersonaProfile
 from ssa.ids import SequentialIdGenerator
 from ssa.runtime.interactive import (
     _CHAT_SYSTEM_PROMPT,
@@ -44,24 +45,27 @@ from ssa.runtime.interactive import (
 from ssa.storage.database import Database
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
+from ssa.storage.romantic_persona_repository import RomanticPersonaRepository
 from ssa.tools.kernel import ToolKernel
 from ssa.tools.models import (
     ImageGenerationArguments,
     ImageGenerationRoute,
-    SodaMusicSearchPlayArguments,
+    MineradioSearchPlayArguments,
     ToolAutonomyContext,
     ToolOutcome,
     WebSearchArguments,
 )
 from ssa.tools.registry import ToolCapability, ToolRegistry
+from ssa.tools.soda_music import soda_music_enabled
 
 
 @pytest.mark.parametrize(
     ("content", "tool_name", "arguments"),
     [
-        ("我要听音乐", "soda_music_control", {"action": "play"}),
-        ("播放暂停", "soda_music_control", {"action": "toggle"}),
-        ("帮我查询 emo 的音乐", "soda_music_search_play", {"query": "emo"}),
+        ("我要听音乐", "mineradio_control", {"action": "play"}),
+        ("播放暂停", "mineradio_control", {"action": "toggle"}),
+        ("帮我查询 emo 的音乐", "mineradio_search_play", {"query": "emo"}),
+        ("用汽水音乐播放晴天", "soda_music_search_play", {"query": "晴天"}),
         ("汽水音乐登录状态", "soda_music_login_status", {}),
     ],
 )
@@ -71,6 +75,12 @@ def test_explicit_music_intents_use_registered_tool_names(
     arguments: dict[str, object],
 ) -> None:
     call = _explicit_music_tool_call(content, "test")
+
+    if "汽水" in content and not soda_music_enabled():
+        if "登录" in content:
+            assert call is None
+            return
+        tool_name = "mineradio_search_play"
 
     assert call is not None
     assert call.function.name == tool_name
@@ -171,6 +181,38 @@ async def test_saved_relationship_preferences_are_injected_into_next_chat_reques
         assert "support_mode=comfort" in system_message
         assert "mostly gentle" in system_message
         assert "companionship before solutions" in system_message
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_saved_romantic_persona_is_injected_as_stable_character_card(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLMAdapter()
+    llm.set_response("interactive_chat", "你先坐好，我陪你把这件事理顺。")
+    llm.set_response("appraisal", _appraisal_json())
+    session = _session(tmp_path, llm)
+    try:
+        RomanticPersonaRepository(str(tmp_path / "interactive.db")).save(
+            RomanticPersonaProfile(
+                owner_address="笨蛋",
+                affection_style=AffectionStyle.EXPRESSIVE,
+                custom_notes="关心要具体，不重复空泛情话。",
+            )
+        )
+
+        await session.send("今天有点累。")
+
+        chat_request = next(call for call in llm.calls if call.purpose == "interactive_chat")
+        system_message = chat_request.messages[0].content or ""
+        assert "Persistent romantic persona card" in system_message
+        assert "Address the owner as '笨蛋'" in system_message
+        assert "Affection style (expressive)" in system_message
+        assert "关心要具体" in system_message
+        assert system_message.index("Persistent romantic persona card") < system_message.index(
+            "Active relationship preferences"
+        )
     finally:
         session.close()
 
@@ -371,9 +413,9 @@ def _fake_music_kernel(calls: list[dict[str, object]]) -> ToolKernel:
     registry = ToolRegistry()
     registry.register(
         ToolCapability(
-            name="soda_music_search_play",
+            name="mineradio_search_play",
             description="test music search",
-            arguments_model=SodaMusicSearchPlayArguments,
+            arguments_model=MineradioSearchPlayArguments,
             handler=search_play,
         )
     )
@@ -801,35 +843,16 @@ async def test_model_autonomously_executes_registered_global_tool(tmp_path: Path
         assert result.tool_results[0].tool_name == "write_file"
         chat_calls = [call for call in llm.calls if call.purpose == "interactive_chat"]
         assert len(chat_calls) == 2
-        assert [item["function"]["name"] for item in chat_calls[0].tools] == [
+        tool_names = [item["function"]["name"] for item in chat_calls[0].tools]
+        assert tool_names == sorted(tool_names)
+        assert {
             "powershell",
             "read_file",
-            "soda_music_control",
-            "soda_music_login_status",
-            "soda_music_now_playing",
-            "soda_music_search_play",
-            "truth_geocode",
-            "truth_holidays",
-            "truth_music",
-            "truth_news",
-            "truth_radio",
-            "truth_service_status",
-            "truth_sun_times",
-            "truth_translate",
+            "record_grounded_prediction",
             "truth_weather",
-            "web_close",
-            "web_open",
-            "web_read",
             "web_search",
-            "web_tabs",
-            "win32_active_window",
-            "win32_clipboard_text",
-            "win32_drives",
-            "win32_list_directory",
-            "win32_processes",
-            "win32_visible_windows",
             "write_file",
-        ]
+        } <= set(tool_names)
         assert chat_calls[0].tool_choice == "auto"
         assert [message.role for message in chat_calls[1].messages[-2:]] == [
             "assistant",
@@ -1022,6 +1045,7 @@ async def test_main_model_image_tool_receives_frontend_route_and_streams_stage_d
             "summary": "Image generated and displayed.",
             "output_chars": 30,
             "truncated": False,
+            "result": "Image generated and displayed.",
             "asset_url": "/api/generated-images/0123456789abcdef0123456789abcdef.png",
             "asset_id": "0123456789abcdef0123456789abcdef.png",
             "mime_type": "image/png",
@@ -1099,11 +1123,11 @@ async def test_explicit_music_request_executes_before_model_reply(tmp_path: Path
         result = await session.send("播放周杰伦的晴天", on_stream=stream_events.append)
 
         assert calls == [{"query": "周杰伦的晴天"}]
-        assert [item.tool_name for item in result.tool_results] == ["soda_music_search_play"]
+        assert [item.tool_name for item in result.tool_results] == ["mineradio_search_play"]
         tool_event = next(
             event for event in result.snapshot.events if event.event_type == "tool.execution"
         )
-        assert tool_event.metadata["tool_name"] == "soda_music_search_play"
+        assert tool_event.metadata["tool_name"] == "mineradio_search_play"
         chat_call = next(call for call in llm.calls if call.purpose == "interactive_chat")
         assert chat_call.tool_choice == "none"
         assert [message.role for message in chat_call.messages[-2:]] == [

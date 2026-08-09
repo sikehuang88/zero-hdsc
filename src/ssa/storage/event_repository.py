@@ -139,6 +139,28 @@ class SqliteEventRepository:
         ).fetchone()
         return self._row_to_event(row) if row is not None else None
 
+    def between_by_conversation(
+        self,
+        conversation_id: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+    ) -> list[Event]:
+        """Return immutable events inside an inclusive verification window."""
+        if not conversation_id.strip():
+            raise ValueError("conversation_id must not be empty")
+        if start_ms < 0 or end_ms < start_ms:
+            raise ValueError("event window must satisfy 0 <= start_ms <= end_ms")
+        rows = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE conversation_id = ? AND created_at_ms BETWEEN ? AND ?
+            ORDER BY created_at_ms, rowid
+            """,
+            (conversation_id, start_ms, end_ms),
+        ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
     # ------------------------------------------------------------------
     # Mapping
     # ------------------------------------------------------------------

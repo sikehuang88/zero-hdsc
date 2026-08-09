@@ -21,7 +21,7 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.DO
 _TOOL_NAME_RE = re.compile(
     r"\b(?:firecrawl_[a-z0-9_]+|web_[a-z0-9_]+|truth_[a-z0-9_]+|"
     r"coding_[a-z0-9_]+|win32_[a-z0-9_]+|"
-    r"soda_music[a-z0-9_]*|read_file|write_file|powershell|generate_image|ask_gpt)\b"
+    r"mineradio_[a-z0-9_]+|soda_music[a-z0-9_]*|read_file|write_file|powershell|generate_image|ask_gpt)\b"
 )
 _ALLOWED_TOP_LEVEL = {"SKILL.md", "agents", "scripts", "references", "assets"}
 _RESERVED_SKILL_IDS = {skill.id for skill in DEFAULT_SKILLS} | {"web-research"}

@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ssa.services.emotion_expression_library import EmotionExpressionLibrary
 
 LIBRARY_ROOT = Path(__file__).resolve().parents[3] / "emotion-value-library"
+pytestmark = pytest.mark.skipif(
+    not LIBRARY_ROOT.is_dir(),
+    reason=f"authored emotion expression library is absent: {LIBRARY_ROOT}",
+)
 
 
 def test_library_loads_authored_scenes_and_discourse_entries() -> None:

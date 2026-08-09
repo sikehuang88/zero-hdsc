@@ -58,6 +58,7 @@ def test_load_defaults_only():
     assert s.reflective_learning.consolidation_interval_minutes == 15
     assert s.emotion_library.enabled is True
     assert s.emotion_library.recall_limit == 6
+    assert s.emotion_library.effective_library_root == "emotion-value-library"
     assert s.reflective_learning.outcome_interval_minutes == 60
     assert s.reflective_learning.min_critic_score == 0.62
 
@@ -117,6 +118,38 @@ def test_hdsc_env_prefix_overrides_legacy_alias() -> None:
     assert settings.retrieval.final_k == 12
 
 
+def test_emotion_library_root_and_outcome_confidence_env_overrides() -> None:
+    settings = load_settings(
+        Environment.DEVELOPMENT,
+        environ={
+            "HDSC_EMOTION_LIBRARY_ROOT": "E:/fixtures/emotion-library",
+            "HDSC_MIN_OUTCOME_CONFIDENCE": "1.75",
+        },
+    )
+
+    assert settings.emotion_library.effective_library_root == "E:/fixtures/emotion-library"
+    assert settings.reflective_learning.min_outcome_confidence == 1.75
+
+
+def test_custom_model_ids_are_accepted():
+    config = LLMConfig(
+        model="claude-sonnet-4-5",
+        reasoning_model="anthropic/custom-reasoning-model",
+    )
+
+    assert config.model == "claude-sonnet-4-5"
+    assert config.reasoning_model == "anthropic/custom-reasoning-model"
+
+
+def test_env_overrides_custom_reasoning_model():
+    s = load_settings(
+        Environment.DEVELOPMENT,
+        environ={"HDSC_LLM_REASONING_MODEL": "claude-sonnet-4-5"},
+    )
+
+    assert s.llm.reasoning_model == "claude-sonnet-4-5"
+
+
 def test_env_overrides_deepseek_v4_controls():
     s = load_settings(
         Environment.DEVELOPMENT,
@@ -145,6 +178,34 @@ def test_env_overrides_deepseek_v4_controls():
     assert s.llm.thinking_mode == ThinkingMode.ENABLED
     assert s.llm.reasoning_effort == ReasoningEffort.MAX
     assert s.llm.user_id == "ssa_test_user"
+
+
+def test_env_overrides_anthropic_reasoning_gateway():
+    s = load_settings(
+        Environment.DEVELOPMENT,
+        environ={
+            "HDSC_LLM_ANTHROPIC_BASE_URL": "https://pool.chaozhiyuanai.com/",
+            "HDSC_ANTHROPIC_AUTH_TOKEN": "sk-pool-token",
+            "ANTHROPIC_BASE_URL": "https://fallback.example/",
+            "ANTHROPIC_AUTH_TOKEN": "sk-plain-token",
+        },
+    )
+
+    assert s.llm.anthropic_base_url == "https://pool.chaozhiyuanai.com"
+    assert s.secrets.anthropic_auth_token.get_secret_value() == "sk-pool-token"
+
+
+def test_plain_anthropic_env_names_are_accepted():
+    s = load_settings(
+        Environment.DEVELOPMENT,
+        environ={
+            "ANTHROPIC_BASE_URL": "https://pool.chaozhiyuanai.com/",
+            "ANTHROPIC_AUTH_TOKEN": "sk-plain-token",
+        },
+    )
+
+    assert s.llm.anthropic_base_url == "https://pool.chaozhiyuanai.com"
+    assert s.secrets.anthropic_auth_token.get_secret_value() == "sk-plain-token"
 
 
 def test_env_overrides_temperature():
@@ -445,9 +506,9 @@ def test_temperature_out_of_range_rejected():
         LLMConfig(temperature=5.0)
 
 
-def test_deprecated_model_alias_rejected():
-    with pytest.raises(ValueError, match="DeepSeek V4"):
-        LLMConfig(model="deepseek/deepseek-chat")
+def test_empty_model_id_rejected():
+    with pytest.raises(ValueError, match="model id"):
+        LLMConfig(model="   ")
 
 
 def test_sampling_controls_are_mutually_exclusive():
@@ -462,6 +523,15 @@ def test_sampling_controls_are_mutually_exclusive():
 def test_invalid_base_url_is_rejected(base_url: str):
     with pytest.raises(ValueError, match="base URL"):
         LLMConfig(base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://", "ftp://pool.chaozhiyuanai.com", "https://pool.chaozhiyuanai.com?tenant=x"],
+)
+def test_invalid_anthropic_base_url_is_rejected(base_url: str):
+    with pytest.raises(ValueError, match="base URL"):
+        LLMConfig(anthropic_base_url=base_url)
 
 
 def test_dotenv_is_loaded_when_environment_mapping_is_implicit(

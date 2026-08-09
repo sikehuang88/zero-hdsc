@@ -308,6 +308,22 @@ event ledger stores only tool name, result state, timing, elevation state, exit
 code, and argument/output hashes. Runtime controls are under `[tools]` in
 `config/defaults.toml` and the corresponding `HDSC_TOOLS_*` environment values.
 
+### Grounded predictions
+
+The live session exposes `record_grounded_prediction` for concrete claims with a
+machine-checkable `event_match` predicate. Predictions are append-only records
+with a finite verification window; the lifecycle worker resolves them from
+immutable events without asking the model to grade its own output. Resolved
+claims contribute `(confidence - outcome)^2` to the Brier score, while the
+dashboard snapshot includes ten confidence buckets, observed rates, and a
+base-rate baseline. External-truth and tool-result verifier shapes are accepted
+as explicit `unverifiable` records until their fixed provider adapters are wired.
+
+The `[emotion_library].library_root` setting (or `HDSC_EMOTION_LIBRARY_ROOT`)
+controls the optional authored expression corpus. `hdsc doctor` reports its
+resolved path and loaded scene/entry counts instead of allowing a missing corpus
+to fail silently.
+
 Use a separate persistent conversation when needed:
 
 ```powershell

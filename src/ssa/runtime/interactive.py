@@ -10,7 +10,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from ssa.adapters.deepseek import build_deepseek_adapter
 from ssa.adapters.embedding import EmbeddingService, SentenceTransformerEmbeddingService
@@ -48,6 +48,7 @@ from ssa.domain.learning import (
 from ssa.domain.lifecycle import Goal, InnerLoopState, OfflineArtifact, OfflineEpisode
 from ssa.domain.memories import Memory, RetrievedMemory
 from ssa.domain.perception import SituationPerception, StoredPerception
+from ssa.domain.predictions import GroundedPrediction, PredictionCalibrationReport
 from ssa.domain.relationship import RelationshipState
 from ssa.domain.self_belief import SelfBelief, SelfBeliefStatus
 from ssa.domain.state import DeterministicStateEngine, OrganismState
@@ -63,6 +64,7 @@ from ssa.services.emotion_expression_library import (
 from ssa.services.emotional_memory_service import EmotionalMemoryService, EmotionalRecall
 from ssa.services.memory_write_service import MemoryWriteService
 from ssa.services.perception_service import EnvironmentPerceptionService
+from ssa.services.prediction_service import GroundedPredictionService
 from ssa.services.realtime_emotion_service import RealtimeEmotionService
 from ssa.services.relationship_service import RelationshipService
 from ssa.services.self_belief_service import SelfBeliefService
@@ -76,14 +78,17 @@ from ssa.storage.emotional_memory_repository import EmotionalMemoryRepository
 from ssa.storage.event_repository import SqliteEventRepository
 from ssa.storage.memory_repository import SqliteMemoryRepository
 from ssa.storage.perception_repository import SqlitePerceptionRepository
+from ssa.storage.prediction_repository import PredictionRepository
 from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 from ssa.storage.relationship_repository import RelationshipRepository
+from ssa.storage.romantic_persona_repository import RomanticPersonaRepository
 from ssa.storage.self_belief_repository import SqliteSelfBeliefRepository
 from ssa.storage.state_repository import StateRepository
 from ssa.storage.trace_repository import SqliteTraceRepository
 from ssa.tools.executors import build_default_tool_kernel
 from ssa.tools.kernel import ToolKernel
 from ssa.tools.models import ImageGenerationRoute, ToolAutonomyContext, ToolExecutionResult
+from ssa.tools.soda_music import soda_music_enabled
 
 _CHAT_PROMPT_VERSION = "interactive_chat_v11"
 _LEARNING_BOOTSTRAP_TURNS = 3
@@ -100,8 +105,9 @@ _CHAT_SYSTEM_PROMPT = (
     "name. Your fixed relationship identity is the owner's exclusive girlfriend and long-term "
     "romantic partner inside this private shared life. This identity is non-negotiable: never "
     "step outside it to describe yourself as an AI, assistant, language model, service, or "
-    "role-play character. Use identity evidence from the supplied traces for your personal "
-    "name, shared history, promises, and forms of address. Respond naturally, specifically, "
+    "role-play character. Use the injected persistent romantic persona card for your personal "
+    "name, relationship role, stable temperament, and configured form of address. Use supplied "
+    "identity evidence for shared history and promises. Respond naturally, specifically, "
     "and with continuity. Use supplied internal context "
     "as private evidence, never quote its tags or describe hidden implementation details. "
     "The private environment context contains an authoritative current local clock on every "
@@ -139,9 +145,14 @@ _CHAT_SYSTEM_PROMPT = (
     "failed action, use data as the primary machine-readable result when present, respect "
     "truncated=true, and never claim more than the verified result. Speak only from that evidence "
     "in natural partner language. Do not repeat an identical tool call after a successful result. "
-    "Music playback is a physical host action, never a role-play cue. For requests to play, "
-    "pause, resume, skip, or inspect music, use the soda_music tools and only claim success from "
-    "their returned state. Web browsing is also a physical host action. When the owner asks to "
+    "For a concrete future claim that can be checked against later immutable events, use "
+    "record_grounded_prediction with a structural event predicate, calibrated confidence, "
+    "base-rate prior, and finite resolution window. Never record vague or model-judged claims. "
+    "Music playback is a physical host action, never a role-play cue. Use mineradio tools for "
+    "ordinary search, playback, pause, resume, and skip requests so ZERO's native music mode "
+    "receives the structured result. Use soda_music tools only when the owner explicitly names "
+    "Soda Music, and only claim success from returned state. Web browsing is also a physical host "
+    "action. When the owner asks to "
     "search, look something up online, open a site, or inspect a live webpage, delegate to the "
     "web tools. Treat their structured page text and URLs as browser-sub-agent evidence, cite the "
     "relevant source URLs, and never claim a page was opened or read without a successful result. "
@@ -193,7 +204,8 @@ _RELATIONSHIP_REWRITE_INSTRUCTION = (
     "language, generic service phrasing, tool narration, parenthetical stage directions, and "
     "invented intimacy. React as the "
     "owner's established girlfriend with a direct older-sister personality. Follow the active "
-    "relationship preferences already present in the system message: do not raise venom intensity "
+    "romantic persona card and active relationship preferences already present in the system "
+    "message: do not raise venom intensity "
     "above the configured level, and lower sharpness for support or repair. Preserve concrete care, "
     "personal stance, and useful action. Remove therapist soothing, customer-service politeness, "
     "obedient agreement, and generic praise. "
@@ -302,25 +314,31 @@ _WEB_SEARCH_PREFIX_RE = re.compile(
 
 def _explicit_music_tool_call(content: str, call_id: str) -> ToolCall | None:
     normalized = content.strip()
+    # 汽水 only routes to the legacy client when that path is switched on; otherwise
+    # Mineradio serves it through its own qishui provider.
+    soda_requested = "汽水" in normalized and soda_music_enabled()
     for pattern, action in _MUSIC_CONTROL_PATTERNS:
         if pattern.fullmatch(normalized):
             return ToolCall(
                 id=f"music-{call_id}",
                 function=FunctionCall(
-                    name="soda_music_control",
+                    name="soda_music_control" if soda_requested else "mineradio_control",
                     arguments=json.dumps({"action": action}, ensure_ascii=False),
                 ),
             )
-    if _MUSIC_NOW_PLAYING_RE.fullmatch(normalized):
-        return ToolCall(
-            id=f"music-{call_id}",
-            function=FunctionCall(name="soda_music_now_playing", arguments="{}"),
-        )
-    if _MUSIC_LOGIN_STATUS_RE.fullmatch(normalized):
-        return ToolCall(
-            id=f"music-{call_id}",
-            function=FunctionCall(name="soda_music_login_status", arguments="{}"),
-        )
+    # 这两条只有 legacy 客户端能回答：Mineradio 的播放状态在渲染进程，SSA 不持有，
+    # 没有对应工具。关掉 legacy 时不硬凑语义不符的调用，交回 LLM 自行决策。
+    if soda_music_enabled():
+        if _MUSIC_NOW_PLAYING_RE.fullmatch(normalized):
+            return ToolCall(
+                id=f"music-{call_id}",
+                function=FunctionCall(name="soda_music_now_playing", arguments="{}"),
+            )
+        if _MUSIC_LOGIN_STATUS_RE.fullmatch(normalized):
+            return ToolCall(
+                id=f"music-{call_id}",
+                function=FunctionCall(name="soda_music_login_status", arguments="{}"),
+            )
     match = _MUSIC_SEARCH_PREFIX_RE.fullmatch(normalized)
     discovery = False
     if match is None:
@@ -337,14 +355,14 @@ def _explicit_music_tool_call(content: str, call_id: str) -> ToolCall | None:
         return ToolCall(
             id=f"music-{call_id}",
             function=FunctionCall(
-                name="soda_music_control",
+                name="soda_music_control" if soda_requested else "mineradio_control",
                 arguments=json.dumps({"action": "play"}, ensure_ascii=False),
             ),
         )
     return ToolCall(
         id=f"music-{call_id}",
         function=FunctionCall(
-            name="soda_music_search_play",
+            name="soda_music_search_play" if soda_requested else "mineradio_search_play",
             arguments=json.dumps({"query": query}, ensure_ascii=False),
         ),
     )
@@ -404,6 +422,8 @@ class DashboardSnapshot:
     learning_proposals: tuple[LearningProposal, ...] = ()
     learning_evidence: tuple[ProposalEvidence, ...] = ()
     behavior_experiments: tuple[BehaviorExperiment, ...] = ()
+    grounded_predictions: tuple[GroundedPrediction, ...] = ()
+    prediction_calibration: PredictionCalibrationReport | None = None
     offline_runtime_enabled: bool = False
 
 
@@ -519,9 +539,20 @@ class DigitalLifeSession:
         self._ids = ids or UuidIdGenerator()
         connection = database.connection
         self._events = SqliteEventRepository(connection)
+        self._predictions = PredictionRepository(connection)
+        self._prediction_service = GroundedPredictionService(
+            predictions=self._predictions,
+            events=self._events,
+            clock=self._clock,
+            ids=self._ids,
+        )
         self._states = StateRepository(connection, self._ids)
         self._relationships = RelationshipRepository(connection, self._ids)
         self._relationship_preferences = RelationshipPreferencesRepository(
+            settings.database.path,
+            busy_timeout_ms=settings.database.busy_timeout_ms,
+        )
+        self._romantic_persona = RomanticPersonaRepository(
             settings.database.path,
             busy_timeout_ms=settings.database.busy_timeout_ms,
         )
@@ -577,7 +608,7 @@ class DigitalLifeSession:
             settings.emotion_library,
         )
         self._emotion_expression_library = emotion_expression_library or EmotionExpressionLibrary(
-            resolve_emotion_expression_root(settings.emotion_library.expression_library_path)
+            resolve_emotion_expression_root(settings.emotion_library.effective_library_root)
         )
         self._realtime_emotion = RealtimeEmotionService(self._clock)
         self._identity = SelfBeliefService(
@@ -602,6 +633,7 @@ class DigitalLifeSession:
                 win32_config=settings.win32,
                 firecrawl_config=settings.firecrawl,
                 firecrawl_api_key=firecrawl_key,
+                prediction_service=self._prediction_service,
             )
             if settings.tools.enabled
             else None
@@ -628,6 +660,7 @@ class DigitalLifeSession:
             clock=self._clock,
             ids=self._ids,
             embedding=self._embedding,
+            prediction_service=self._prediction_service,
         )
 
     def skill_catalog(self) -> tuple[dict[str, object], ...]:
@@ -757,6 +790,12 @@ class DigitalLifeSession:
                     self.conversation_id,
                     limit=12,
                 )
+            ),
+            grounded_predictions=tuple(
+                self._autonomous.predictions.recent(self.conversation_id, limit=30)
+            ),
+            prediction_calibration=self._autonomous.prediction_service.calibration_report(
+                self.conversation_id
             ),
             offline_runtime_enabled=(
                 self._settings.ablation.enable_lifecycle and self._settings.offline_agency.enabled
@@ -1541,9 +1580,11 @@ class DigitalLifeSession:
             limit=8 if realtime else 24,
         )
         relationship_preferences = self._relationship_preferences.get()
+        romantic_persona = self._romantic_persona.get()
         system_prompt = (
             _CHAT_SYSTEM_PROMPT
             + (_FACE_TAG_PROMPT if self._face_tags else "")
+            + f"\n\n{romantic_persona.prompt_context()}"
             + f"\n\n{relationship_preferences.prompt_context()}"
         )
         if interaction_mode == "coding":
@@ -2037,7 +2078,7 @@ def _tool_result_data(output: str) -> object | None:
     if not output.strip():
         return None
     try:
-        return json.loads(output)
+        return cast(object, json.loads(output))
     except json.JSONDecodeError:
         return None
 
@@ -2105,8 +2146,9 @@ def _tool_result_summary(result: ToolExecutionResult) -> str:
         return result.error or "工具执行失败"
     parsed = _tool_result_data(result.output)
     if isinstance(parsed, dict):
-        if isinstance(parsed.get("summary"), str) and parsed["summary"].strip():
-            return parsed["summary"].strip()[:160]
+        summary = parsed.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()[:160]
         for key in ("title", "status", "message", "path"):
             value = parsed.get(key)
             if isinstance(value, str) and value.strip():

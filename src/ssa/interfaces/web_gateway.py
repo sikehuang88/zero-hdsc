@@ -43,6 +43,7 @@ from ssa.domain.events import Event
 from ssa.interfaces.coding_workspace_api import coding_workspace_router
 from ssa.interfaces.community_api import community_router
 from ssa.interfaces.relationship_preferences_api import relationship_preferences_router
+from ssa.interfaces.romantic_persona_api import romantic_persona_router
 from ssa.runtime.interactive import (
     DigitalLifeSession,
     SessionStreamEvent,
@@ -755,6 +756,12 @@ def create_app(
     )
     app.include_router(
         relationship_preferences_router(
+            settings.database.path,
+            busy_timeout_ms=settings.database.busy_timeout_ms,
+        )
+    )
+    app.include_router(
+        romantic_persona_router(
             settings.database.path,
             busy_timeout_ms=settings.database.busy_timeout_ms,
         )

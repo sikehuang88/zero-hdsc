@@ -38,7 +38,7 @@ from ssa.storage.lifecycle_repository import OfflineAgencyRepository
 from ssa.storage.trace_repository import SqliteTraceRepository
 
 _HOUR_MS = 3_600_000
-_RULES_VERSION = "reflective-learning-rules-v1"
+_RULES_VERSION = "reflective-learning-rules-v2"
 _PROMPT_VERSION = "offline-learning-v1"
 
 _POSITIVE_CUES = (
@@ -54,6 +54,7 @@ _POSITIVE_CUES = (
     "good idea",
 )
 _NEGATIVE_CUES = (
+    "没什么用",
     "不对",
     "不好",
     "没用",
@@ -65,6 +66,38 @@ _NEGATIVE_CUES = (
     "wrong",
     "stop doing",
 )
+_NEGATORS = ("不", "没", "无", "别", "非", "未")
+_SELF_REF = ("我", "咱", "俺")
+_MASKED_IDIOMS = (
+    "不好意思",
+    "对不对",
+    "不客气",
+    "没什么",
+    "没关系",
+    "好不好",
+    "行不行",
+    "是不是",
+    "没用过",
+    "不至于",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeSignal:
+    """A language-derived polarity with an explicit abstention path."""
+
+    polarity: float
+    confidence: float
+    matched: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CueHit:
+    cue: str
+    polarity: float
+    start: int
+    flipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -368,20 +401,67 @@ class ReflectiveLearningService:
                     )
                 )
                 continue
-            signals = [_outcome_signal(event.content) for event in user_events]
-            score = max(-1.0, min(1.0, sum(signals) / max(1, len(signals))))
-            explicit = sum(signal != 0.0 for signal in signals)
-            confidence = _clip(0.30 + 0.20 * len(user_events) + 0.20 * explicit)
+            signals = [outcome_signal(event.content) for event in user_events]
+            usable = [signal for signal in signals if signal.confidence > 0.0]
+            total_confidence = sum(signal.confidence for signal in usable)
+            score = (
+                sum(signal.polarity * signal.confidence for signal in usable) / total_confidence
+                if total_confidence > 0.0
+                else 0.0
+            )
+            score = max(-1.0, min(1.0, score))
+            confidence = _clip(total_confidence / max(0.1, self._config.min_outcome_confidence))
+            latest = user_events[-1]
+            signal_payload = [
+                {
+                    "polarity": signal.polarity,
+                    "confidence": signal.confidence,
+                    "matched": list(signal.matched),
+                    "reason": signal.reason,
+                }
+                for signal in signals
+            ]
+            if total_confidence < self._config.min_outcome_confidence:
+                outcome = self._learning.insert_outcome(
+                    OutcomeObservation(
+                        id=self._ids.new(),
+                        experiment_id=experiment.id,
+                        dedup_key=f"outcome:{experiment.id}:{latest.id}:{_RULES_VERSION}",
+                        source_event_id=latest.id,
+                        observation_kind=OutcomeVerdict.INCONCLUSIVE,
+                        payload={
+                            "observed_event_ids": [event.id for event in user_events],
+                            "signals": signal_payload,
+                            "total_confidence": total_confidence,
+                            "required_confidence": self._config.min_outcome_confidence,
+                        },
+                        normalized_score=score,
+                        confidence=confidence,
+                        prediction_error=_clip(abs(0.35 - score) / 1.35),
+                        observed_at_ms=latest.created_at_ms,
+                        created_at_ms=now_ms,
+                    )
+                )
+                outcomes.append(outcome)
+                postponed = experiment.model_copy(
+                    update={
+                        "due_at_ms": now_ms + self._config.outcome_interval_minutes * 60_000,
+                        "updated_at_ms": now_ms,
+                    }
+                )
+                experiments.append(
+                    self._learning.update_experiment(ExperimentStatus.RUNNING, postponed)
+                )
+                continue
             verdict = (
                 OutcomeVerdict.CONFIRMED
                 if score >= 0.20
                 else OutcomeVerdict.CONTRADICTED
                 if score <= -0.20
                 else OutcomeVerdict.MIXED
-                if explicit
+                if usable
                 else OutcomeVerdict.INCONCLUSIVE
             )
-            latest = user_events[-1]
             outcome = self._learning.insert_outcome(
                 OutcomeObservation(
                     id=self._ids.new(),
@@ -391,7 +471,8 @@ class ReflectiveLearningService:
                     observation_kind=verdict,
                     payload={
                         "observed_event_ids": [event.id for event in user_events],
-                        "explicit_signal_count": explicit,
+                        "signals": signal_payload,
+                        "total_confidence": total_confidence,
                     },
                     normalized_score=score,
                     confidence=confidence,
@@ -821,13 +902,78 @@ def _source_trust(source: SourceKind) -> float:
     }.get(source, 0.40)
 
 
-def _outcome_signal(content: str) -> float:
+def outcome_signal(content: str) -> OutcomeSignal:
+    """Extract bounded feedback evidence without treating silence as neutral evidence."""
     text = content.casefold()
-    if any(cue in text for cue in _NEGATIVE_CUES):
-        return -1.0
-    if any(cue in text for cue in _POSITIVE_CUES):
-        return 1.0
-    return 0.0
+    masked = _masked_intervals(text)
+    hits = [
+        *_scan_cues(text, _POSITIVE_CUES, 1.0, masked),
+        *_scan_cues(text, _NEGATIVE_CUES, -1.0, masked),
+    ]
+    classified: list[_CueHit] = []
+    for hit in sorted(hits, key=lambda item: (item.start, -len(item.cue), item.cue)):
+        prefix = text[max(0, hit.start - 2) : hit.start]
+        flipped = any(negator in prefix for negator in _NEGATORS)
+        polarity = -hit.polarity if flipped else hit.polarity
+        # Only lexical negative cues use the self-attribution filter. Applying it to a
+        # flipped positive cue would incorrectly discard direct feedback such as 我不喜欢.
+        if hit.polarity < 0.0 and any(reference in prefix for reference in _SELF_REF):
+            continue
+        classified.append(
+            _CueHit(
+                cue=hit.cue,
+                polarity=polarity,
+                start=hit.start,
+                flipped=flipped,
+            )
+        )
+
+    if not classified:
+        return OutcomeSignal(0.0, 0.0, (), "no_usable_signal")
+    matched = tuple(hit.cue for hit in classified)
+    polarities = {hit.polarity for hit in classified}
+    if len(polarities) > 1:
+        return OutcomeSignal(0.0, 0.0, matched, "conflicting_signals")
+    confidence = (
+        0.6 if any(hit.flipped for hit in classified) else 0.95 if len(classified) > 1 else 0.8
+    )
+    return OutcomeSignal(classified[0].polarity, confidence, matched, "matched_feedback")
+
+
+def _masked_intervals(text: str) -> tuple[tuple[int, int], ...]:
+    intervals: list[tuple[int, int]] = []
+    for idiom in _MASKED_IDIOMS:
+        start = 0
+        while True:
+            index = text.find(idiom, start)
+            if index < 0:
+                break
+            end = index + len(idiom)
+            # 没什么用 is substantive negative feedback, not the standalone idiom 没什么.
+            if not (idiom == "没什么" and text[end : end + 1] == "用"):
+                intervals.append((index, end))
+            start = index + 1
+    return tuple(intervals)
+
+
+def _scan_cues(
+    text: str,
+    cues: tuple[str, ...],
+    polarity: float,
+    masked: tuple[tuple[int, int], ...],
+) -> list[_CueHit]:
+    hits: list[_CueHit] = []
+    for cue in cues:
+        start = 0
+        while True:
+            index = text.find(cue, start)
+            if index < 0:
+                break
+            end = index + len(cue)
+            if not any(index < mask_end and end > mask_start for mask_start, mask_end in masked):
+                hits.append(_CueHit(cue=cue, polarity=polarity, start=index))
+            start = index + 1
+    return hits
 
 
 def _clip(value: float) -> float:
@@ -837,6 +983,8 @@ def _clip(value: float) -> float:
 __all__ = [
     "ConsolidationResult",
     "OutcomeEvaluationResult",
+    "OutcomeSignal",
     "ReflectionScheduleResult",
     "ReflectiveLearningService",
+    "outcome_signal",
 ]

@@ -195,7 +195,7 @@ recall_limit = 6
 candidate_limit = 240
 recency_half_life_days = 45.0
 backfill_limit = 500
-expression_library_path = "emotion-value-library"
+library_root = "emotion-value-library"
 expression_entry_limit = 5
 expression_scene_limit = 2
 
@@ -209,6 +209,7 @@ min_critic_score = 0.62
 min_evidence_count = 1
 experiment_duration_hours = 6
 experiment_min_observations = 1
+min_outcome_confidence = 1.2
 max_runs_per_cycle = 4
 max_proposals_per_cycle = 8
 policy_experiments_enabled = true

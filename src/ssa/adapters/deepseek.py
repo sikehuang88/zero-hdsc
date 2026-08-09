@@ -28,18 +28,18 @@ _OFFICIAL_MODEL_IDS = {
     "DeepSeek-V4-Flash": ANTHROPIC_V4_FLASH,
     "DeepSeek-V4-Pro": ANTHROPIC_V4_PRO,
 }
-_DEPRECATED_ALIASES = {
-    "deepseek-chat",
-    "deepseek-reasoner",
-    "deepseek/deepseek-chat",
-    "deepseek/deepseek-reasoner",
-}
 
 
 class DeepSeekV4Adapter(LiteLLMAdapter):
     """LiteLLM transport constrained to the current DeepSeek V4 API contract."""
 
-    def __init__(self, api_key: str, config: LLMConfig) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        config: LLMConfig,
+        *,
+        anthropic_auth_token: str = "",
+    ) -> None:
         super().__init__(
             api_key,
             api_base=config.base_url,
@@ -48,6 +48,7 @@ class DeepSeekV4Adapter(LiteLLMAdapter):
             provider_name="deepseek",
         )
         self._config = config
+        self._anthropic_auth_token = anthropic_auth_token
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         self._validate_request(request)
@@ -149,20 +150,23 @@ class DeepSeekV4Adapter(LiteLLMAdapter):
                 # Raw extra_body preserves DeepSeek V4's actual high/max strength.
                 extra_body["reasoning_effort"] = reasoning_effort.value
 
+        if anthropic_route:
+            effective_api_key = self._anthropic_auth_token or self._api_key
+            effective_base_url = self._config.anthropic_base_url or self._config.base_url
+        else:
+            effective_api_key = self._api_key
+            effective_base_url = (
+                self._config.beta_base_url
+                if _requires_beta_endpoint(request)
+                else self._config.base_url
+            )
+
         kwargs: dict[str, Any] = {
             "model": normalized_model,
             "messages": [message.to_api_dict() for message in request.messages],
             "max_tokens": request.max_tokens,
-            "api_key": self._api_key,
-            "base_url": (
-                self._config.base_url
-                if anthropic_route
-                else (
-                    self._config.beta_base_url
-                    if _requires_beta_endpoint(request)
-                    else self._config.base_url
-                )
-            ),
+            "api_key": effective_api_key,
+            "base_url": effective_base_url,
             "timeout": request.timeout_seconds or self._config.timeout_seconds,
             "max_retries": self._config.retry_count,
             "extra_body": extra_body,
@@ -373,20 +377,8 @@ def _is_anthropic_route(model: str) -> bool:
 
 
 def _normalize_model(model: str) -> str:
-    if model in _DEPRECATED_ALIASES:
-        raise LLMInvalidRequestError(
-            "deepseek-chat and deepseek-reasoner expired on 2026-07-24; use a V4 model",
-            provider="deepseek",
-            model=model,
-        )
-    normalized = _OFFICIAL_MODEL_IDS.get(model, model)
-    if normalized not in DEEPSEEK_V4_MODELS:
-        raise LLMInvalidRequestError(
-            "DeepSeek V4 supports deepseek-v4-flash and deepseek-v4-pro",
-            provider="deepseek",
-            model=model,
-        )
-    return normalized
+    """Map known aliases to canonical ids; pass custom model ids through unchanged."""
+    return _OFFICIAL_MODEL_IDS.get(model, model)
 
 
 def _requires_beta_endpoint(request: LLMRequest) -> bool:
@@ -400,7 +392,11 @@ def _requires_beta_endpoint(request: LLMRequest) -> bool:
 
 def build_deepseek_adapter(settings: Settings) -> DeepSeekV4Adapter:
     """Build the production DeepSeek adapter from validated project settings."""
-    return DeepSeekV4Adapter(settings.secrets.require_llm(), settings.llm)
+    return DeepSeekV4Adapter(
+        settings.secrets.require_llm(),
+        settings.llm,
+        anthropic_auth_token=settings.secrets.anthropic_auth_token.get_secret_value(),
+    )
 
 
 __all__ = [

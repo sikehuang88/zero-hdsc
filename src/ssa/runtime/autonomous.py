@@ -30,6 +30,7 @@ from ssa.services.outbox_service import (
     OutboxDeliveryService,
     WindowsDesktopChannel,
 )
+from ssa.services.prediction_service import GroundedPredictionService
 from ssa.services.proactive_contact_policy import ProactiveContactPolicy
 from ssa.services.reflective_learning_service import ReflectiveLearningService
 from ssa.services.resting_state_service import RestingStateService
@@ -51,6 +52,7 @@ from ssa.storage.lifecycle_repository import (
     WorldObservationRepository,
 )
 from ssa.storage.memory_repository import SqliteMemoryRepository
+from ssa.storage.prediction_repository import PredictionRepository
 from ssa.storage.relationship_preferences_repository import RelationshipPreferencesRepository
 from ssa.storage.relationship_repository import RelationshipRepository
 from ssa.storage.state_repository import StateRepository
@@ -79,6 +81,7 @@ class AutonomousRuntime:
         ids: IdGenerator | None = None,
         external_truth: ExternalTruthExecutor | None = None,
         embedding: EmbeddingService | None = None,
+        prediction_service: GroundedPredictionService | None = None,
     ) -> None:
         self.conversation_id = conversation_id
         self._settings = settings
@@ -92,6 +95,17 @@ class AutonomousRuntime:
 
         connection = database.connection
         self.events = SqliteEventRepository(connection)
+        self.predictions = (
+            prediction_service.repository
+            if prediction_service is not None
+            else PredictionRepository(connection)
+        )
+        self.prediction_service = prediction_service or GroundedPredictionService(
+            predictions=self.predictions,
+            events=self.events,
+            clock=self._clock,
+            ids=self._ids,
+        )
         self.states = StateRepository(connection, self._ids)
         self.relationships = RelationshipRepository(connection, self._ids)
         self.traces = SqliteTraceRepository(connection)
@@ -276,6 +290,11 @@ class AutonomousRuntime:
                 now_ms,
                 now_ms,
             )
+            self.jobs.expedite(
+                f"lifecycle:{self.conversation_id}:learning.resolve_predictions",
+                now_ms,
+                now_ms,
+            )
 
     def observe_agent_event(
         self,
@@ -335,6 +354,11 @@ class AutonomousRuntime:
         self.worker.register(
             "learning.evaluate_outcomes",
             self._learning_evaluate_outcomes,
+            interval_ms=self._settings.reflective_learning.outcome_interval_minutes * 60_000,
+        )
+        self.worker.register(
+            "learning.resolve_predictions",
+            self._learning_resolve_predictions,
             interval_ms=self._settings.reflective_learning.outcome_interval_minutes * 60_000,
         )
         self.worker.register(
@@ -478,6 +502,10 @@ class AutonomousRuntime:
         result = self.reflective_service.evaluate_outcomes(self.conversation_id)
         self._dashboard_events.extend(result.events)
 
+    async def _learning_resolve_predictions(self, _job: ScheduledJob) -> None:
+        result = self.prediction_service.resolve_due(self.conversation_id)
+        self._dashboard_events.extend(result.events)
+
     async def _outbox_deliver(self, _job: ScheduledJob) -> None:
         result = await self.delivery_service.deliver_due(limit=16)
         self._proactive_events.extend(result.events)
@@ -491,6 +519,7 @@ class AutonomousRuntime:
             self.jobs.expedite(f"{prefix}trace.resting_step", now_ms, now_ms)
             self.jobs.expedite(f"{prefix}initiative.evaluate", now_ms, now_ms)
             self.jobs.expedite(f"{prefix}learning.evaluate_outcomes", now_ms, now_ms)
+            self.jobs.expedite(f"{prefix}learning.resolve_predictions", now_ms, now_ms)
 
     def _organism(self) -> OrganismState:
         return self.states.latest() or OrganismState.initial(self._clock.now_ms())

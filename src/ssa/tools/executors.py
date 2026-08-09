@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import locale
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -19,12 +21,14 @@ from ssa.config import (
     ToolConfig,
     Win32Config,
 )
+from ssa.services.prediction_service import GroundedPredictionService
 from ssa.tools.coding import CodingToolExecutor
 from ssa.tools.external_truth import ExternalTruthExecutor
 from ssa.tools.firecrawl import FirecrawlExecutor
 from ssa.tools.gpt_bridge import GPTBridgeExecutor
 from ssa.tools.image_generation import ImageGenerationExecutor
 from ssa.tools.kernel import ToolKernel
+from ssa.tools.mineradio import MineradioExecutor
 from ssa.tools.models import (
     PowerShellArguments,
     ReadFileArguments,
@@ -32,10 +36,12 @@ from ssa.tools.models import (
     ToolOutcome,
     WriteFileArguments,
 )
+from ssa.tools.predictions import GroundedPredictionExecutor
 from ssa.tools.registry import ToolCapability, ToolRegistry
-from ssa.tools.soda_music import SodaMusicExecutor
 from ssa.tools.web_browser import BrowserSubAgent
 from ssa.tools.win32_registry import Win32ToolExecutor
+
+logger = logging.getLogger(__name__)
 
 
 class GlobalToolExecutor:
@@ -333,12 +339,15 @@ def build_default_tool_kernel(
     win32_config: Win32Config | None = None,
     firecrawl_config: FirecrawlConfig | None = None,
     firecrawl_api_key: str = "",
+    prediction_service: GroundedPredictionService | None = None,
 ) -> ToolKernel:
     registry = ToolRegistry()
     GlobalToolExecutor(config).register_into(registry)
     CodingToolExecutor().register_into(registry)
     ImageGenerationExecutor().register_into(registry)
     BrowserSubAgent().register_into(registry)
+    if prediction_service is not None:
+        GroundedPredictionExecutor(prediction_service).register_into(registry)
     truth_config = external_truth_config or ExternalTruthConfig()
     if truth_config.enabled:
         ExternalTruthExecutor(truth_config).register_into(registry)
@@ -347,7 +356,16 @@ def build_default_tool_kernel(
     if multimodal_config is not None and multimodal_config.enabled and multimodal_api_key:
         GPTBridgeExecutor(multimodal_config, multimodal_api_key).register_into(registry)
     if os.name == "nt":
-        SodaMusicExecutor().register_into(registry)
+        MineradioExecutor().register_into(registry)
+        if find_spec("websockets") is None:
+            logger.info("soda_music tools unavailable: websockets not installed")
+        else:
+            try:
+                from ssa.tools.soda_music import SodaMusicExecutor
+            except ImportError as exc:
+                logger.info("soda_music tools unavailable: %s", exc)
+            else:
+                SodaMusicExecutor().register_into(registry)
         if win32_config is not None and win32_config.enabled:
             Win32ToolExecutor(win32_config).register_into(registry)
     return ToolKernel(registry, max_output_chars=config.max_output_chars)

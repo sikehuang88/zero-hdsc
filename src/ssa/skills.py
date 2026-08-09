@@ -148,9 +148,9 @@ DEFAULT_SKILLS = (
     SkillDefinition(
         "music",
         "音乐控制",
-        "搜索、播放与控制汽水音乐，并读取真实播放状态。",
-        "Use Soda Music for playback actions and verify returned player state.",
-        ("soda_music*",),
+        "搜索并播放多平台音乐; 控制 ZERO 音乐模式; 同时保留汽水桌面播放能力。",
+        "Prefer Mineradio for ZERO's native music mode. Use Soda Music only when the user explicitly names it.",
+        ("mineradio_*", "soda_music*"),
         ("音乐", "歌曲", "播放", "暂停", "下一首", "上一首", "汽水", "想听"),
         priority=95,
     ),

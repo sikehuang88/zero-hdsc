@@ -41,6 +41,7 @@ async def test_runtime_bootstrap_is_persistent_and_runs_every_module(tmp_path: P
             "reflection.schedule",
             "learning.consolidate",
             "learning.evaluate_outcomes",
+            "learning.resolve_predictions",
             "trace.resting_step",
             "goal.advance",
             "initiative.evaluate",
@@ -51,7 +52,7 @@ async def test_runtime_bootstrap_is_persistent_and_runs_every_module(tmp_path: P
         }
 
         tick = await runtime.tick()
-        assert tick.lifecycle.leased == 14
+        assert tick.lifecycle.leased == 15
         assert tick.lifecycle.failed == 0
         assert runtime.states.latest() is not None
         assert runtime.goals.list_active("conversation-1")

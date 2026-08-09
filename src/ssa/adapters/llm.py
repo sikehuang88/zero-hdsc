@@ -15,7 +15,6 @@ import inspect
 import json
 import logging
 import time
-import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -774,11 +773,11 @@ def _parse_tool_calls(raw_calls: object) -> list[ToolCall]:
     for raw_call in raw_calls:
         function = _value(raw_call, "function", {})
         call_id = _value(raw_call, "id", None) or _value(raw_call, "call_id", None)
-        call_type = _value(raw_call, "type", None) or "function"
+        call_type = _value(raw_call, "type", None)
         name = _value(function, "name", None)
         arguments = _value(function, "arguments", None)
         if not isinstance(call_id, str) or not call_id:
-            call_id = f"tool-{uuid.uuid4().hex}"
+            raise ValueError("each tool call requires a non-empty id")
         if call_type != "function":
             raise ValueError("each tool call requires type=function")
         if not isinstance(name, str) or not name:

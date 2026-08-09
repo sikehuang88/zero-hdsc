@@ -125,12 +125,13 @@ def _install_stream(
 
 
 def _adapter(**overrides: Any) -> DeepSeekV4Adapter:
+    anthropic_auth_token = overrides.pop("anthropic_auth_token", "")
     config = LLMConfig(
         base_url=_BASE_URL,
         beta_base_url=_BETA_BASE_URL,
         **overrides,
     )
-    return DeepSeekV4Adapter("test-key", config)
+    return DeepSeekV4Adapter("test-key", config, anthropic_auth_token=anthropic_auth_token)
 
 
 def _request(**overrides: Any) -> LLMRequest:
@@ -185,6 +186,68 @@ async def test_flash_non_thinking_request_uses_official_endpoint(
             "temperature": 0.3,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_route_uses_anthropic_gateway_and_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_completion(monkeypatch, [_response()])
+    adapter = _adapter(
+        anthropic_base_url="https://pool.chaozhiyuanai.com/",
+        anthropic_auth_token="anthropic-token",
+    )
+
+    await adapter.complete(
+        _request(
+            model="anthropic/DeepSeek-V4-Pro",
+            temperature=None,
+            thinking=ThinkingMode.ENABLED,
+        )
+    )
+
+    assert calls[0]["base_url"] == "https://pool.chaozhiyuanai.com"
+    assert calls[0]["api_key"] == "anthropic-token"
+    assert calls[0]["model"] == "anthropic/DeepSeek-V4-Pro"
+    assert calls[0]["extra_body"]["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_route_falls_back_to_default_gateway_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_completion(monkeypatch, [_response()])
+
+    await _adapter().complete(_request(model="anthropic/DeepSeek-V4-Pro"))
+
+    assert calls[0]["base_url"] == _BASE_URL
+    assert calls[0]["api_key"] == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_settings_factory_passes_anthropic_token_to_reasoning_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_completion(monkeypatch, [_response()])
+    settings = Settings(
+        llm=LLMConfig(
+            base_url=_BASE_URL,
+            anthropic_base_url="https://pool.chaozhiyuanai.com",
+        ),
+        secrets=Secrets.from_env(
+            {
+                "DEEPSEEK_API_KEY": "factory-key",
+                "ANTHROPIC_AUTH_TOKEN": "factory-anthropic-key",
+            }
+        ),
+    )
+
+    await build_deepseek_adapter(settings).complete(
+        _request(model="anthropic/DeepSeek-V4-Pro")
+    )
+
+    assert calls[0]["base_url"] == "https://pool.chaozhiyuanai.com"
+    assert calls[0]["api_key"] == "factory-anthropic-key"
 
 
 @pytest.mark.asyncio
@@ -960,18 +1023,19 @@ async def test_undeclared_seed_parameter_is_rejected(
         "deepseek-reasoner",
         "deepseek/deepseek-chat",
         "deepseek/deepseek-reasoner",
+        "claude-sonnet-4-5",
+        "anthropic/custom-model",
     ],
 )
-async def test_deprecated_model_aliases_are_rejected(
+async def test_custom_model_ids_pass_through(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
 ) -> None:
     calls = _install_completion(monkeypatch, [_response()])
 
-    with pytest.raises(LLMInvalidRequestError, match="expired"):
-        await _adapter().complete(_request(model=model))
+    await _adapter().complete(_request(model=model))
 
-    assert calls == []
+    assert calls[0]["model"] == model
 
 
 @pytest.mark.asyncio
