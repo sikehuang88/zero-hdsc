@@ -414,6 +414,27 @@ Implementation files:
 - `src/ssa/hdsc/archive.py` — separated Pareto objectives and behavior archive.
 - `tests/unit/test_seos_program.py` — P0/P1 unit coverage.
 
+### Retrodiction self-play
+
+The first offline fitness path now evaluates SEOS programs against immutable
+archive slices. `ArchivedEvent` records are split by a historical cut point;
+`build_episodes` creates recurrence episodes, `evidence_before` enforces strict
+no-future leakage, and `RetrodictionEvaluator` scores probabilities with Brier
+skill against a topic base rate. `EvolutionService` can use that evaluator for
+zero-LLM tier-1 filtering and validation/archive selection.
+
+```python
+from ssa.hdsc import ArchivedEvent, EpisodeConfig, build_episodes
+from ssa.services.retrodiction_evaluator import RetrodictionEvaluator
+
+archive = [ArchivedEvent("e1", 1_700_000_000_000, "user", "关于跑步的记录")]
+episodes = build_episodes(archive, EpisodeConfig())
+```
+
+The loop is shadow-only: it evolves offline retrodiction candidates and does
+not promote a champion into the live conversation path. Synthetic archive
+benchmarks are regression fixtures, not evidence of online improvement.
+
 ## License
 
 MIT.

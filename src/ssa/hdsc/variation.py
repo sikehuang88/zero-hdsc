@@ -186,31 +186,123 @@ def crossover_subgraph(
     return _checked(replace(receiver, nodes=_replacement_nodes(receiver, replacement)), registry)
 
 
-def apply_random_variation(
-    program: Program,
-    *,
-    seed: int,
-    registry: OperatorRegistry = PRIMITIVE_REGISTRY,
-) -> Program:
-    """Apply one deterministic point variation."""
-
-    checked = _checked(program, registry)
-    if not checked.nodes:
-        return checked
-    rng = derive_rng("mutate", seed, len(checked.nodes))
-    node_index = int(rng.integers(0, len(checked.nodes)))
-    node = checked.nodes[node_index]
+def _point_alternatives(
+    node: Node,
+    registry: OperatorRegistry,
+) -> tuple[str, ...]:
     operator = registry.require(node.operator_id)
-    alternatives = tuple(
+    return tuple(
         candidate.operator_id
         for candidate in registry.values()
         if candidate.operator_id != operator.operator_id
         and candidate.signature == operator.signature
         and candidate.purity == operator.purity
     )
-    if alternatives:
-        replacement = alternatives[int(rng.integers(0, len(alternatives)))]
-        return mutate_point(checked, node.node_id, replacement, registry=registry)
+
+
+def _mutated_parameters(
+    node: Node,
+    registry: OperatorRegistry,
+    rng: np.random.Generator,
+) -> tuple[tuple[str, object], ...] | None:
+    """Perturb one declared parameter of ``node`` within its bounds."""
+
+    specs = registry.require(node.operator_id).parameters
+    if not specs:
+        return None
+    spec = specs[int(rng.integers(0, len(specs)))]
+    current = spec.default
+    for name, value in node.parameters:
+        if name == spec.name and isinstance(value, (int, float)) and not isinstance(value, bool):
+            current = float(value)
+            break
+    span = spec.high - spec.low
+    proposed = spec.clamp(current + float(rng.normal(0.0, span * 0.2)))
+    if proposed == current:
+        proposed = spec.clamp(current + span * 0.05)
+    retained = tuple((name, value) for name, value in node.parameters if name != spec.name)
+    merged = (*retained, (spec.name, round(proposed, 6)))
+    return tuple(sorted(merged, key=lambda item: item[0]))
+
+
+def _unary_endomorphisms(value_type: Ty, registry: OperatorRegistry) -> tuple[str, ...]:
+    return tuple(
+        candidate.operator_id
+        for candidate in registry.values()
+        if candidate.purity == "pure"
+        and len(candidate.signature.params) == 1
+        and candidate.signature.params[0] == value_type
+        and candidate.signature.result == value_type
+    )
+
+
+def apply_random_variation(
+    program: Program,
+    *,
+    seed: int,
+    registry: OperatorRegistry = PRIMITIVE_REGISTRY,
+) -> Program:
+    """Apply one deterministic variation drawn from all admissible kinds.
+
+    Point mutation alone is not enough to explore: it requires a
+    same-signature sibling in the registry, and most primitives here have a
+    unique signature, so a point-only policy returns the input unchanged for
+    nearly every node and the population never leaves its parent.
+    """
+
+    checked = _checked(program, registry)
+    if not checked.nodes:
+        return checked
+    rng = derive_rng("mutate", seed, len(checked.nodes))
+
+    candidates: list[tuple[str, Node, int]] = []
+    for node in checked.nodes:
+        operator = registry.require(node.operator_id)
+        if _point_alternatives(node, registry):
+            candidates.append(("point", node, 0))
+        if operator.parameters:
+            candidates.append(("param", node, 0))
+        for input_index, edge_type in enumerate(operator.signature.params):
+            if _unary_endomorphisms(edge_type, registry):
+                candidates.append(("insert", node, input_index))
+        if (
+            len(operator.signature.params) == 1
+            and operator.purity == "pure"
+            and operator.signature.result == operator.signature.params[0]
+            and len(checked.nodes) > 1
+        ):
+            candidates.append(("delete", node, 0))
+    if not candidates:
+        return checked
+
+    order = rng.permutation(len(candidates))
+    for index in order:
+        kind, node, input_index = candidates[int(index)]
+        try:
+            if kind == "point":
+                options = _point_alternatives(node, registry)
+                choice = options[int(rng.integers(0, len(options)))]
+                return mutate_point(checked, node.node_id, choice, registry=registry)
+            if kind == "param":
+                parameters = _mutated_parameters(node, registry, rng)
+                if parameters is None:
+                    continue
+                return mutate_param(checked, node.node_id, parameters, registry=registry)
+            if kind == "insert":
+                edge_type = registry.require(node.operator_id).signature.params[input_index]
+                options = _unary_endomorphisms(edge_type, registry)
+                choice = options[int(rng.integers(0, len(options)))]
+                return mutate_insert(
+                    checked,
+                    node.node_id,
+                    input_index,
+                    choice,
+                    registry=registry,
+                )
+            if kind == "delete":
+                return mutate_delete(checked, node.node_id, registry=registry)
+        except (VariationError, ProgramTypeError):
+            continue
     return checked
 
 

@@ -125,6 +125,29 @@ def static_budget_gate(
     return StaticBudgetReport(cost, program.node_count, program.depth, True)
 
 
+def _value_key(value: object) -> str:
+    """Return a collision-free content key for one runtime value.
+
+    ``repr`` is not usable on its own: NumPy truncates large arrays, so two
+    different arrays sharing their edge elements render identically and would
+    otherwise collide into one memoization entry and return the wrong result.
+    """
+
+    buffer = getattr(value, "tobytes", None)
+    if callable(buffer):
+        shape = getattr(value, "shape", ())
+        dtype = getattr(value, "dtype", "")
+        digest = hashlib.sha256(buffer()).hexdigest()
+        return f"buffer:{dtype}:{shape}:{digest}"
+    digest_property = getattr(value, "digest", None)
+    if isinstance(digest_property, str):
+        return f"digest:{type(value).__name__}:{digest_property}"
+    if isinstance(value, (tuple, list)):
+        joined = "|".join(_value_key(item) for item in value)
+        return f"seq:{len(value)}:{hashlib.sha256(joined.encode('utf-8')).hexdigest()}"
+    return f"repr:{type(value).__name__}:{value!r}"
+
+
 def _cache_key(
     operator_id: str,
     args: tuple[object, ...],
@@ -132,10 +155,10 @@ def _cache_key(
 ) -> str:
     payload = {
         "operator": operator_id,
-        "args": repr(args),
-        "parameters": parameters,
+        "args": [_value_key(item) for item in args],
+        "parameters": [[name, _value_key(item)] for name, item in parameters],
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=repr)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

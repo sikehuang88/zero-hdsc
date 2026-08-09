@@ -76,6 +76,34 @@ class Signature:
 
 
 @dataclass(frozen=True, slots=True)
+class ParameterSpec:
+    """A bounded tunable parameter of one operator.
+
+    Parameter mutation is the only variation that applies to every node
+    regardless of the registry's signature population, so without a declared
+    space most programs have no reachable neighbours at all.
+    """
+
+    name: str
+    low: float
+    high: float
+    default: float
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("parameter name must not be empty")
+        if not (isfinite(self.low) and isfinite(self.high) and isfinite(self.default)):
+            raise ValueError("parameter bounds must be finite")
+        if self.low >= self.high:
+            raise ValueError("parameter low must be below high")
+        if not self.low <= self.default <= self.high:
+            raise ValueError("parameter default must lie within its bounds")
+
+    def clamp(self, value: float) -> float:
+        return min(self.high, max(self.low, value))
+
+
+@dataclass(frozen=True, slots=True)
 class Operator:
     """One named primitive in the typed operator algebra."""
 
@@ -84,10 +112,14 @@ class Operator:
     purity: Purity
     gradient: Diff
     cost: float = 1.0
+    parameters: tuple[ParameterSpec, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.operator_id.strip():
             raise ValueError("operator_id must not be empty")
+        names = [spec.name for spec in self.parameters]
+        if len(names) != len(set(names)):
+            raise ValueError("operator parameter names must be unique")
         if not isfinite(self.cost) or self.cost <= 0.0:
             raise ValueError("operator cost must be finite and positive")
         if self.purity == "effecting" and self.signature.eff_flux == 0:
@@ -157,25 +189,107 @@ def build_primitive_registry() -> OperatorRegistry:
             "read",
             "none",
             cost=3.0,
+            parameters=(
+                ParameterSpec("threshold", -1.0, 1.0, 0.0),
+                ParameterSpec("max_events", 1.0, 128.0, 64.0),
+            ),
         ),
         Operator("conductance", Signature((Coll("set", EV),), GR, 0), "pure", "exact"),
         Operator("laplacian", Signature((GR,), GR, 0), "pure", "exact"),
-        Operator("propagate", Signature((GR, Z), Z, 0), "pure", "exact", cost=2.0),
+        Operator(
+            "propagate",
+            Signature((GR, Z), Z, 0),
+            "pure",
+            "exact",
+            cost=2.0,
+            parameters=(ParameterSpec("diffusion_time", 0.0, 2.0, 0.25),),
+        ),
         Operator("directed_rates", Signature((Coll("set", EV),), GR, 0), "pure", "exact"),
-        Operator("propagate_directed", Signature((GR, Z), Z, 0), "pure", "exact", cost=2.0),
-        Operator("allocate_mass", Signature((Coll("set", EV),), Z, 0), "pure", "exact"),
+        Operator(
+            "propagate_directed",
+            Signature((GR, Z), Z, 0),
+            "pure",
+            "exact",
+            cost=2.0,
+            parameters=(ParameterSpec("diffusion_time", 0.0, 2.0, 0.25),),
+        ),
+        Operator(
+            "allocate_mass",
+            Signature((Coll("set", EV),), Z, 0),
+            "pure",
+            "exact",
+            parameters=(ParameterSpec("half_life_steps", 0.5, 64.0, 8.0),),
+        ),
         Operator("topk", Signature((Coll("set", HV), SC), set_hv, 0), "pure", "exact"),
         Operator("rank_by", Signature((set_hv, score_to_score), seq_hv, 0), "pure", "exact"),
-        Operator("leak", Signature((Z,), Z, 0), "pure", "exact"),
-        Operator("liquid", Signature((Z, Z), Z, 0), "pure", "exact", cost=2.0),
+        Operator(
+            "leak",
+            Signature((Z,), Z, 0),
+            "pure",
+            "exact",
+            parameters=(ParameterSpec("beta", 0.0, 1.0, 0.9),),
+        ),
+        Operator(
+            "liquid",
+            Signature((Z, Z), Z, 0),
+            "pure",
+            "exact",
+            cost=2.0,
+            parameters=(ParameterSpec("alpha", 0.0, 1.0, 0.3),),
+        ),
         Operator("integrate", Signature((Z, Z), Z, 0), "pure", "exact"),
         Operator("appraise", Signature((EV, CTX), AFF, 0), "read", "none", cost=2.0),
-        Operator("modulate", Signature((AFF, SC), SC, 0), "pure", "exact"),
-        Operator("blend", Signature((AFF, AFF), AFF, 0), "pure", "exact"),
+        Operator(
+            "modulate",
+            Signature((AFF, SC), SC, 0),
+            "pure",
+            "exact",
+            parameters=(ParameterSpec("gain", -1.0, 1.0, 0.25),),
+        ),
+        Operator(
+            "blend",
+            Signature((AFF, AFF), AFF, 0),
+            "pure",
+            "exact",
+            parameters=(ParameterSpec("weight", 0.0, 1.0, 0.5),),
+        ),
+        # Scalar sinks. Without an operator whose result is Sc and whose inputs
+        # are not already Sc, the type graph has no path from evidence to a
+        # score, so no program can emit a decision and there is nothing for
+        # selection to act on.
+        Operator(
+            "similarity",
+            Signature((HV, HV), SC, 0, (True, True)),
+            "pure",
+            "exact",
+        ),
+        Operator("z_energy", Signature((Z,), SC, 0), "pure", "exact"),
+        Operator(
+            "calibrate",
+            Signature((SC,), SC, 0),
+            "pure",
+            "exact",
+            parameters=(
+                ParameterSpec("scale", -12.0, 12.0, 4.0),
+                ParameterSpec("bias", -6.0, 6.0, 0.0),
+            ),
+        ),
         Operator("relation_update", Signature((REL, EV), REL, 0), "read", "none"),
-        Operator("rewire", Signature((GR, SC), GR, 0), "pure", "exact", cost=2.0),
+        Operator(
+            "rewire",
+            Signature((GR, SC), GR, 0),
+            "pure",
+            "exact",
+            cost=2.0,
+        ),
         Operator("community", Signature((GR,), Coll("set", GR), 0), "pure", "exact", cost=2.0),
-        Operator("decay", Signature((GR,), GR, 0), "pure", "exact"),
+        Operator(
+            "decay",
+            Signature((GR,), GR, 0),
+            "pure",
+            "exact",
+            parameters=(ParameterSpec("lambda", 0.0, 1.0, 0.9),),
+        ),
     )
     for primitive in primitives:
         registry.register(primitive)
