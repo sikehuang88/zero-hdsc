@@ -19,6 +19,7 @@ from ssa.tools.opencode import (
     OpencodeError,
     OpencodeExecutor,
     OpencodeJob,
+    _assistant_message,
     _JobState,
     _OpencodeHttpClient,
 )
@@ -155,14 +156,11 @@ async def test_http_client_submits_async_prompt_and_polls_assistant_output(tmp_p
     )
     calls: list[tuple[str, str]] = []
 
-    async def resolve(_directory: str) -> str:
-        return "project-1"
-
     async def request(method: str, path: str, payload: object = None) -> object:
         del payload
         calls.append((method, path))
-        if method == "POST" and path.endswith("/session"):
-            return {"id": "session-1"}
+        if method == "POST" and path.startswith("/session?directory="):
+            return {"id": "session-1", "projectID": "project-1"}
         if method == "POST" and path.endswith("/prompt_async"):
             return {}
         if method == "GET" and path.endswith("/message"):
@@ -178,7 +176,6 @@ async def test_http_client_submits_async_prompt_and_polls_assistant_output(tmp_p
             ]
         raise AssertionError(f"unexpected request: {method} {path}")
 
-    client._resolve_project_id = resolve  # type: ignore[method-assign]
     client._request = request  # type: ignore[method-assign]
     job = await client.create_session_and_prompt(
         task="run focused tests",
@@ -195,6 +192,7 @@ async def test_http_client_submits_async_prompt_and_polls_assistant_output(tmp_p
     assert status["summary"] == "async result"
     assert status["conversation_id"] == "conversation-1"
     assert any(method == "POST" and path.endswith("/prompt_async") for method, path in calls)
+    assert any(method == "GET" and path == "/session/session-1/message" for method, path in calls)
     assert not any(method == "POST" and path.endswith("/message") for method, path in calls)
 
 
@@ -227,6 +225,20 @@ async def test_partial_assistant_text_does_not_complete_job() -> None:
 
     assert state.state == "running"
     assert state.summary == "partial output"
+
+
+def test_recorded_opencode_schema_distinguishes_running_and_completed() -> None:
+    probe_path = (
+        Path(__file__).parents[2]
+        / "notes"
+        / "experiments"
+        / "2026-08-09_opencode_message_schema_probe.json"
+    )
+    probe = json.loads(probe_path.read_text(encoding="utf-8"))
+    observations = {item["phase"]: item["message"] for item in probe["observations"]}
+
+    assert _assistant_message([observations["running"]])[2] is False
+    assert _assistant_message([observations["aborted"]])[2] is True
 
 
 @pytest.mark.asyncio

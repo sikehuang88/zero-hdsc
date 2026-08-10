@@ -1,0 +1,41 @@
+{
+  "source": "local opencode serve GET /session/{sessionID}/message",
+  "prompt_async_status": 204,
+  "content_redacted": true,
+  "observations": [
+    {
+      "phase": "running",
+      "message": {
+        "info": {
+          "role": "assistant",
+          "time": {
+            "created": 1786328681430
+          }
+        },
+        "parts": []
+      }
+    },
+    {
+      "phase": "aborted",
+      "message": {
+        "info": {
+          "role": "assistant",
+          "time": {
+            "created": 1786328681430,
+            "completed": 1786328897929
+          }
+        },
+        "parts": []
+      }
+    }
+  ],
+  "source_contract": {
+    "session_create": "POST /session?directory=...",
+    "prompt_async": "POST /session/{sessionID}/prompt_async",
+    "messages": "GET /session/{sessionID}/message",
+    "success_completion_fields": [
+      "info.finish",
+      "info.time.completed"
+    ]
+  }
+}

@@ -229,13 +229,13 @@ class _OpencodeHttpClient:
             except TimeoutError as exc:
                 raise OpencodeError("opencode capacity exhausted; retry later") from exc
             acquired = True
-            project_id = await self._resolve_project_id(directory)
             session_payload = await self._request(
                 "POST",
-                f"/project/{quote(project_id, safe='')}/session",
-                {"directory": directory},
+                f"/session?directory={quote(directory, safe='')}",
+                {},
             )
             session_id = _string_id(session_payload, "session id")
+            project_id = _project_id(session_payload) or directory
             job = OpencodeJob(
                 job_id=f"opencode:{uuid.uuid4().hex}",
                 session_id=session_id,
@@ -289,7 +289,7 @@ class _OpencodeHttpClient:
         try:
             response = await self._request(
                 "POST",
-                self._message_path(state) + "/prompt_async",
+                self._session_path(state) + "/prompt_async",
                 {
                     "model": _model_payload(model),
                     "parts": [{"type": "text", "text": task}],
@@ -336,8 +336,7 @@ class _OpencodeHttpClient:
         try:
             payload = await self._request(
                 "GET",
-                f"/project/{quote(state.job.project_id, safe='')}/session/"
-                f"{quote(state.job.session_id, safe='')}/message",
+                self._message_path(state),
             )
         except OpencodeError:
             if state.state == "running":
@@ -360,29 +359,6 @@ class _OpencodeHttpClient:
             state.updated_at = time.time()
             await self._persist_jobs()
 
-    async def _resolve_project_id(self, directory: str) -> str:
-        try:
-            payload = await self._request("GET", "/project")
-        except OpencodeError:
-            payload = []
-        projects = (
-            payload
-            if isinstance(payload, list)
-            else payload.get("projects", [])
-            if isinstance(payload, Mapping)
-            else []
-        )
-        for project in projects:
-            if not isinstance(project, Mapping):
-                continue
-            candidate = str(
-                project.get("worktree") or project.get("directory") or project.get("path") or ""
-            )
-            if candidate and Path(candidate).resolve() == Path(directory).resolve():
-                return _string_id(project, "project id")
-        initialized = await self._request("POST", "/project/init", {"directory": directory})
-        return _string_id(initialized, "project id")
-
     async def _get_job(self, job_id: str) -> _JobState:
         await self._cleanup_jobs()
         async with self._jobs_lock:
@@ -403,11 +379,13 @@ class _OpencodeHttpClient:
             "exit_code": state.exit_code,
         }
 
-    def _message_path(self, state: _JobState) -> str:
+    def _session_path(self, state: _JobState) -> str:
         return (
-            f"/project/{quote(state.job.project_id, safe='')}/session/"
-            f"{quote(state.job.session_id, safe='')}/message"
+            f"/session/{quote(state.job.session_id, safe='')}"
         )
+
+    def _message_path(self, state: _JobState) -> str:
+        return self._session_path(state) + "/message"
 
     def _load_jobs(self) -> None:
         path = _job_store_path(self._config.job_store_path)
@@ -570,6 +548,16 @@ def _optional_id(payload: Any) -> str | None:
         nested = payload.get("info")
         if nested is not None:
             return _optional_id(nested)
+    return None
+
+
+def _project_id(payload: Any) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    for key in ("projectID", "projectId"):
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
     return None
 
 
