@@ -33,9 +33,14 @@
     "session_create": "POST /session?directory=...",
     "prompt_async": "POST /session/{sessionID}/prompt_async",
     "messages": "GET /session/{sessionID}/message",
-    "success_completion_fields": [
+    "terminal_fields": [
       "info.finish",
       "info.time.completed"
-    ]
+    ],
+    "success_fields": [
+      "info.finish",
+      "info.finishReason"
+    ],
+    "completed_without_finish": "aborted"
   }
 }

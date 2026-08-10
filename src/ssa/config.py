@@ -420,6 +420,55 @@ class EngramConfig(BaseModel):
         return self
 
 
+class CementSealConfig(BaseModel):
+    """Defensive-expression state experiment controls."""
+
+    enabled: bool = False
+    base_recurrence: int = 4
+    min_recurrence: int = 2
+    repair_debt_threshold: float = 0.55
+    tension_threshold: float = 0.55
+    base_toughness: float = 0.55
+    scar_toughness_bonus: float = 0.08
+    embrittlement_per_day: float = 0.005
+    embrittlement_floor: float = 0.45
+    absorb_rate: float = 0.35
+    hairline_threshold: float = 0.30
+    max_seal_count: int = 8
+    seal_strength: float = 0.78
+    min_expression: float = 0.22
+    min_repair: float = 0.18
+
+    @model_validator(mode="after")
+    def _validate_cement_seal(self) -> CementSealConfig:
+        if not 1 <= self.min_recurrence <= self.base_recurrence <= 64:
+            raise ValueError(
+                "cement_seal recurrence must satisfy 1 <= min <= base <= 64"
+            )
+        if not 1 <= self.max_seal_count <= 64:
+            raise ValueError("cement_seal max_seal_count must be in [1, 64]")
+        bounded = (
+            "repair_debt_threshold",
+            "tension_threshold",
+            "base_toughness",
+            "scar_toughness_bonus",
+            "embrittlement_per_day",
+            "embrittlement_floor",
+            "absorb_rate",
+            "hairline_threshold",
+            "seal_strength",
+            "min_expression",
+            "min_repair",
+        )
+        for name in bounded:
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"cement_seal {name} must be finite in [0, 1]")
+        if self.min_expression <= 0.0:
+            raise ValueError("cement_seal min_expression must be positive")
+        return self
+
+
 class InitiativeConfig(BaseModel):
     daily_limit: int = 3
     cooldown_minutes: int = 240
@@ -1039,6 +1088,7 @@ class Settings(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     hdsc: HDSCConfig = Field(default_factory=HDSCConfig)
     engram: EngramConfig = Field(default_factory=EngramConfig)
+    cement_seal: CementSealConfig = Field(default_factory=CementSealConfig)
     initiative: InitiativeConfig = Field(default_factory=InitiativeConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -1201,6 +1251,34 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
         set_section("engram", "max_results", int(env["HDSC_ENGRAM_MAX_RESULTS"]))
     if "HDSC_ENGRAM_GRAPH_LIMIT" in env:
         set_section("engram", "graph_limit", int(env["HDSC_ENGRAM_GRAPH_LIMIT"]))
+    if "HDSC_CEMENT_SEAL_ENABLED" in env:
+        set_section(
+            "cement_seal", "enabled", _parse_bool(env["HDSC_CEMENT_SEAL_ENABLED"])
+        )
+    cement_seal_integer_fields = {
+        "HDSC_CEMENT_SEAL_BASE_RECURRENCE": "base_recurrence",
+        "HDSC_CEMENT_SEAL_MIN_RECURRENCE": "min_recurrence",
+        "HDSC_CEMENT_SEAL_MAX_SEAL_COUNT": "max_seal_count",
+    }
+    for env_name, field_name in cement_seal_integer_fields.items():
+        if env_name in env:
+            set_section("cement_seal", field_name, int(env[env_name]))
+    cement_seal_float_fields = {
+        "HDSC_CEMENT_SEAL_REPAIR_DEBT_THRESHOLD": "repair_debt_threshold",
+        "HDSC_CEMENT_SEAL_TENSION_THRESHOLD": "tension_threshold",
+        "HDSC_CEMENT_SEAL_BASE_TOUGHNESS": "base_toughness",
+        "HDSC_CEMENT_SEAL_SCAR_TOUGHNESS_BONUS": "scar_toughness_bonus",
+        "HDSC_CEMENT_SEAL_EMBRITTLEMENT_PER_DAY": "embrittlement_per_day",
+        "HDSC_CEMENT_SEAL_EMBRITTLEMENT_FLOOR": "embrittlement_floor",
+        "HDSC_CEMENT_SEAL_ABSORB_RATE": "absorb_rate",
+        "HDSC_CEMENT_SEAL_HAIRLINE_THRESHOLD": "hairline_threshold",
+        "HDSC_CEMENT_SEAL_SEAL_STRENGTH": "seal_strength",
+        "HDSC_CEMENT_SEAL_MIN_EXPRESSION": "min_expression",
+        "HDSC_CEMENT_SEAL_MIN_REPAIR": "min_repair",
+    }
+    for env_name, field_name in cement_seal_float_fields.items():
+        if env_name in env:
+            set_section("cement_seal", field_name, float(env[env_name]))
     if "SSA_INITIATIVE_DAILY_LIMIT" in env:
         set_section("initiative", "daily_limit", int(env["SSA_INITIATIVE_DAILY_LIMIT"]))
     if "SSA_INITIATIVE_COOLDOWN_MINUTES" in env:
@@ -1454,6 +1532,7 @@ __all__ = [
     "AblationConfig",
     "AppConfig",
     "BudgetConfig",
+    "CementSealConfig",
     "DatabaseConfig",
     "EmbeddingConfig",
     "EmotionLibraryConfig",

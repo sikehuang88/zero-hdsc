@@ -82,6 +82,23 @@ max_active = 64
 max_results = 32
 graph_limit = 512
 
+[cement_seal]
+enabled = false
+base_recurrence = 4
+min_recurrence = 2
+repair_debt_threshold = 0.55
+tension_threshold = 0.55
+base_toughness = 0.55
+scar_toughness_bonus = 0.08
+embrittlement_per_day = 0.005
+embrittlement_floor = 0.45
+absorb_rate = 0.35
+hairline_threshold = 0.30
+max_seal_count = 8
+seal_strength = 0.78
+min_expression = 0.22
+min_repair = 0.18
+
 [initiative]
 daily_limit = 3
 cooldown_minutes = 240

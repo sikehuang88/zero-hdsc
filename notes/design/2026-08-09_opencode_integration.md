@@ -15,7 +15,7 @@
 
 ## 真实 schema 探针
 
-本地 `opencode serve` 探针记录在 `notes/experiments/2026-08-09_opencode_message_schema_probe.json`。真实运行态 assistant 只有 `info.time.created`；真实 abort 后同一消息增加 `info.time.completed`。OpenCode 源码的成功路径同时写入 `info.finish`，因此完成判定只使用显式终态字段，不使用文本稳定次数。
+本地 `opencode serve` 探针记录在 `notes/experiments/2026-08-09_opencode_message_schema_probe.json`。真实运行态 assistant 只有 `info.time.created`；真实 abort 后同一消息增加 `info.time.completed`。OpenCode 源码的成功路径同时写入 `info.finish`。因此 `time.completed` 只表示生命周期终止：存在成功 finish 才记为 `done/0`，completed 而无 finish 记为 `aborted/1`。文本稳定次数不参与终态判定。
 - 只有 `enabled=true` 且存在 `OPENCODE_SERVER_PASSWORD` 时才注册能力。
 - HTTP 请求使用 Basic Auth，输出受 `poll_max_output_chars` 和 ToolKernel 双重截断。
 - Tool audit 只保存参数/输出哈希、job/session/state/provider 等元数据，不保存原始 diff。

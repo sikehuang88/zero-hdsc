@@ -6,6 +6,7 @@ import pytest
 
 from ssa.config import (
     AblationConfig,
+    CementSealConfig,
     Environment,
     FirecrawlConfig,
     HDSCConfig,
@@ -40,6 +41,7 @@ def test_load_defaults_only():
     assert s.hdsc.h2_shadow_enabled is True
     assert s.hdsc.h2_active_capacity == 8
     assert s.hdsc.h2_cluster_bits == 16
+    assert s.cement_seal == CementSealConfig()
     assert s.identity.review_interval_agent_events == 4
     assert s.identity.review_window_events == 24
     assert s.tools.enabled is True
@@ -258,6 +260,25 @@ def test_hdsc_h2_env_overrides_take_precedence() -> None:
     assert settings.hdsc.h2_retention == 0.70
     assert settings.hdsc.h2_injection_rate == 0.20
     assert settings.hdsc.h2_hysteresis == 0.04
+
+
+def test_cement_seal_env_overrides() -> None:
+    settings = load_settings(
+        Environment.DEVELOPMENT,
+        environ={
+            "HDSC_CEMENT_SEAL_ENABLED": "true",
+            "HDSC_CEMENT_SEAL_BASE_RECURRENCE": "6",
+            "HDSC_CEMENT_SEAL_MIN_RECURRENCE": "3",
+            "HDSC_CEMENT_SEAL_BASE_TOUGHNESS": "0.70",
+            "HDSC_CEMENT_SEAL_MIN_EXPRESSION": "0.25",
+        },
+    )
+
+    assert settings.cement_seal.enabled is True
+    assert settings.cement_seal.base_recurrence == 6
+    assert settings.cement_seal.min_recurrence == 3
+    assert settings.cement_seal.base_toughness == 0.70
+    assert settings.cement_seal.min_expression == 0.25
 
 
 def test_env_overrides_initiative():

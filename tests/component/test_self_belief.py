@@ -107,7 +107,7 @@ def _candidate(event_ids: list[str], confidence: float = 0.6) -> SelfBeliefCandi
 
 def test_migration_adds_version_chain_and_evidence_schema(identity_setup: IdentitySetup):
     setup = identity_setup
-    assert setup.db.schema_version == 25
+    assert setup.db.schema_version == 26
     columns = {
         row["name"] for row in setup.db.connection.execute("PRAGMA table_info(self_beliefs)")
     }

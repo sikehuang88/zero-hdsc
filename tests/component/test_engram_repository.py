@@ -52,7 +52,7 @@ def test_engram_store_is_idempotent_directed_and_bitemporal(tmp_path: Path) -> N
             now_ms=25,
         )
 
-        assert database.schema_version == 25
+        assert database.schema_version == 26
         assert repository.count("conversation-1") == 2
         assert active == [forward]
         assert repository.active_edges("conversation-1", ["B"], now_ms=15) == [expired]

@@ -67,8 +67,8 @@ def test_initialize_creates_parent_directory(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_25_after_migrations(db: Database):
-    assert db.schema_version == 25
+def test_schema_version_is_26_after_migrations(db: Database):
+    assert db.schema_version == 26
 
 
 def test_trace_schema_retains_warped_affect_tension(db: Database) -> None:
@@ -135,7 +135,7 @@ def test_migration_006_upgrades_both_phase1_and_transitional_databases(
     assert legacy["version"] == 1
     assert legacy["candidate_since_ms"] == 100
     assert legacy["activated_at_ms"] == 100
-    assert upgraded.schema_version == 25
+    assert upgraded.schema_version == 26
     upgraded.close()
 
 
@@ -183,6 +183,8 @@ def test_all_tables_exist(db: Database):
         "predictions",
         "engram_nodes",
         "engram_edges",
+        "cement_seal_state",
+        "cement_seal_transitions",
     }
     rows = db.connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     actual = {r["name"] for r in rows}
@@ -204,7 +206,7 @@ def test_deferred_vector_table_is_retried_when_extension_recovers(
         int(row["version"])
         for row in deferred.connection.execute("SELECT version FROM schema_migrations")
     }
-    assert deferred.schema_version == 25
+    assert deferred.schema_version == 26
     assert 8 not in deferred_versions
     assert 10 not in deferred_versions
     assert 11 in deferred_versions
@@ -230,7 +232,7 @@ def test_deferred_vector_table_is_retried_when_extension_recovers(
         int(row["version"])
         for row in recovered.connection.execute("SELECT version FROM schema_migrations")
     }
-    assert recovered.schema_version == 25
+    assert recovered.schema_version == 26
     assert set(range(1, 12)) <= recovered_versions
     assert recovered.vec_extension_loaded is True
     assert (

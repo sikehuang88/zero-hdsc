@@ -54,6 +54,14 @@ class _JobState:
     task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
+@dataclass(frozen=True)
+class _AssistantMessageState:
+    text: str = ""
+    message_id: str | None = None
+    finished: bool = False
+    succeeded: bool = False
+
+
 class OpencodeExecutor:
     """Expose fire/check/export without consuming the outer tool-loop budget."""
 
@@ -346,14 +354,22 @@ class _OpencodeHttpClient:
         text = _message_text(payload)
         if text:
             state.summary = text[-max_chars:]
-        assistant_text, assistant_id, assistant_complete = _assistant_message(payload)
-        if assistant_id is not None:
-            state.message_id = assistant_id
-        if assistant_text:
-            state.summary = assistant_text[-max_chars:]
-        if state.state == "running" and assistant_complete:
-            state.state = "done"
-            state.exit_code = 0
+        assistant = _assistant_message(payload)
+        if assistant.message_id is not None:
+            state.message_id = assistant.message_id
+        if assistant.text:
+            state.summary = assistant.text[-max_chars:]
+        if state.state == "running" and assistant.finished:
+            if assistant.succeeded:
+                state.state = "done"
+                state.exit_code = 0
+            else:
+                state.state = "aborted"
+                state.exit_code = 1
+                if not assistant.text:
+                    state.summary = (
+                        "opencode assistant terminated without a successful finish signal"
+                    )
         current = (state.state, state.message_id, state.exit_code)
         if current != previous:
             state.updated_at = time.time()
@@ -588,12 +604,19 @@ def _message_text(payload: Any) -> str:
     return "\n".join(values)
 
 
-def _assistant_message(payload: Any) -> tuple[str, str | None, bool]:
-    """Return the latest assistant text, id, and completion signal."""
+_NONTERMINAL_FINISH_REASONS = frozenset({"tool-calls", "unknown"})
+_FAILED_FINISH_REASONS = frozenset(
+    {"aborted", "cancelled", "canceled", "content-filter", "error", "failed", "length"}
+)
+_TERMINAL_STATUSES = frozenset(
+    {"aborted", "cancelled", "canceled", "completed", "done", "error", "failed", "success"}
+)
+
+
+def _assistant_message(payload: Any) -> _AssistantMessageState:
+    """Return terminal semantics for the latest assistant message only."""
     messages = payload if isinstance(payload, list) else [payload]
-    latest_text = ""
-    latest_id: str | None = None
-    complete = False
+    latest = _AssistantMessageState()
     for message in messages:
         if not isinstance(message, Mapping):
             continue
@@ -603,18 +626,35 @@ def _assistant_message(payload: Any) -> tuple[str, str | None, bool]:
         if role != "assistant":
             continue
         text = _message_text(message)
-        if text:
-            latest_text = text
-        latest_id = _optional_id(message) or latest_id
+        message_id = _optional_id(message)
         timing = info_map.get("time")
         status = str(message.get("status") or info_map.get("status") or "").lower()
-        complete = complete or bool(
-            info_map.get("finish")
-            or info_map.get("finishReason")
-            or (isinstance(timing, Mapping) and timing.get("completed"))
-            or status in {"done", "completed", "success"}
+        finish = str(info_map.get("finish") or info_map.get("finishReason") or "").lower()
+        has_error = info_map.get("error") is not None
+        completed = bool(isinstance(timing, Mapping) and timing.get("completed"))
+        intermediate = finish in _NONTERMINAL_FINISH_REASONS and not has_error
+        finished = bool(
+            has_error
+            or (
+                not intermediate
+                and (finish or completed or status in _TERMINAL_STATUSES)
+            )
         )
-    return latest_text, latest_id, complete
+        succeeded = bool(
+            not has_error
+            and not intermediate
+            and (
+                (finish and finish not in _NONTERMINAL_FINISH_REASONS | _FAILED_FINISH_REASONS)
+                or status == "success"
+            )
+        )
+        latest = _AssistantMessageState(
+            text=text,
+            message_id=message_id,
+            finished=finished,
+            succeeded=succeeded,
+        )
+    return latest
 
 
 def _job_store_path(value: str) -> Path | None:

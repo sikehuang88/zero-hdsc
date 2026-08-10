@@ -169,6 +169,7 @@ async def test_http_client_submits_async_prompt_and_polls_assistant_output(tmp_p
                     "info": {
                         "id": "message-1",
                         "role": "assistant",
+                        "finish": "stop",
                         "time": {"completed": 1},
                     },
                     "parts": [{"type": "text", "text": "async result"}],
@@ -237,8 +238,73 @@ def test_recorded_opencode_schema_distinguishes_running_and_completed() -> None:
     probe = json.loads(probe_path.read_text(encoding="utf-8"))
     observations = {item["phase"]: item["message"] for item in probe["observations"]}
 
-    assert _assistant_message([observations["running"]])[2] is False
-    assert _assistant_message([observations["aborted"]])[2] is True
+    running = _assistant_message([observations["running"]])
+    aborted = _assistant_message([observations["aborted"]])
+
+    assert running.finished is False
+    assert running.succeeded is False
+    assert aborted.finished is True
+    assert aborted.succeeded is False
+
+
+@pytest.mark.asyncio
+async def test_completed_without_finish_is_reported_as_aborted() -> None:
+    probe_path = (
+        Path(__file__).parents[2]
+        / "notes"
+        / "experiments"
+        / "2026-08-09_opencode_message_schema_probe.json"
+    )
+    probe = json.loads(probe_path.read_text(encoding="utf-8"))
+    aborted = next(item["message"] for item in probe["observations"] if item["phase"] == "aborted")
+    client = _OpencodeHttpClient(OpencodeConfig(job_store_path=""), "secret", "opencode")
+    state = _JobState(
+        job=OpencodeJob(
+            job_id="opencode:aborted",
+            session_id="session-1",
+            project_id="project-1",
+            model="provider/model",
+        )
+    )
+
+    async def request(_method: str, _path: str, _payload: object = None) -> object:
+        return [aborted]
+
+    client._request = request  # type: ignore[method-assign]
+    await client._refresh_messages(state, max_chars=100)
+
+    assert state.state == "aborted"
+    assert state.exit_code == 1
+    assert "without a successful finish signal" in state.summary
+
+
+def test_only_latest_assistant_controls_terminal_state() -> None:
+    observation = _assistant_message(
+        [
+            {
+                "info": {
+                    "id": "message-tool",
+                    "role": "assistant",
+                    "finish": "tool-calls",
+                    "time": {"created": 1, "completed": 2},
+                },
+                "parts": [],
+            },
+            {
+                "info": {
+                    "id": "message-current",
+                    "role": "assistant",
+                    "time": {"created": 3},
+                },
+                "parts": [{"type": "text", "text": "still working"}],
+            },
+        ]
+    )
+
+    assert observation.message_id == "message-current"
+    assert observation.text == "still working"
+    assert observation.finished is False
+    assert observation.succeeded is False
 
 
 @pytest.mark.asyncio
