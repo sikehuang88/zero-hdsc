@@ -78,6 +78,40 @@ def test_reverse_reachability_is_not_invented_and_relation_gate_can_close_path()
     assert "C" not in {item.node_id for item in gated.activations}
 
 
+def test_path_provenance_uses_transport_weight_for_parallel_typed_edges() -> None:
+    dominant = EngramEdge(
+        edge_id="edge-low-gate",
+        src="A",
+        dst="B",
+        rel_type=EngramRelation.SEMANTIC,
+        support=10.0,
+        trust_weight=1.0,
+        source_event_id="semantic-evidence",
+        valid_from_ms=1,
+    )
+    gated = EngramEdge(
+        edge_id="edge-high-gate",
+        src="A",
+        dst="B",
+        rel_type=EngramRelation.ENTITY,
+        support=2.0,
+        trust_weight=1.0,
+        source_event_id="entity-evidence",
+        valid_from_ms=1,
+    )
+    result = propagate_engram(
+        ["A", "B"],
+        [dominant, gated],
+        {"A": 1.0},
+        relation_gates={EngramRelation.SEMANTIC: 0.1, EngramRelation.ENTITY: 1.0},
+        config=EngramTransportConfig(max_hops=1),
+    )
+
+    activation = {item.node_id: item for item in result.activations}["B"]
+    assert activation.path[0].rel_type is EngramRelation.ENTITY
+    assert activation.path[0].source_event_id == "entity-evidence"
+
+
 def test_ppr_and_bounded_active_account_for_tail_and_dropped_mass() -> None:
     edges = [
         _edge("edge-ab", "A", "B", EngramRelation.SEMANTIC, "event-ab"),

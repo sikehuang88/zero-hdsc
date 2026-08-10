@@ -763,6 +763,9 @@ class OpencodeConfig(BaseModel):
     base_url: str = "http://127.0.0.1:4096"
     project_dir: str = ""
     request_timeout_seconds: int = 120
+    job_timeout_seconds: int = 3_600
+    job_retention_seconds: int = 86_400
+    job_store_path: str = "data/opencode_jobs.json"
     fire_max_concurrent: int = 2
     poll_max_output_chars: int = 24_000
     default_model: str = "hdsc/deepseek-v4-flash"
@@ -781,6 +784,25 @@ class OpencodeConfig(BaseModel):
         if not 1 <= value <= 600:
             raise ValueError("opencode request_timeout_seconds must be in [1, 600]")
         return value
+
+    @field_validator("job_timeout_seconds")
+    @classmethod
+    def _opencode_job_timeout_bounded(cls, value: int) -> int:
+        if not 60 <= value <= 86_400:
+            raise ValueError("opencode job_timeout_seconds must be in [60, 86400]")
+        return value
+
+    @field_validator("job_retention_seconds")
+    @classmethod
+    def _opencode_job_retention_bounded(cls, value: int) -> int:
+        if not 60 <= value <= 604_800:
+            raise ValueError("opencode job_retention_seconds must be in [60, 604800]")
+        return value
+
+    @field_validator("job_store_path")
+    @classmethod
+    def _opencode_job_store_path_normalized(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("fire_max_concurrent")
     @classmethod
@@ -1325,6 +1347,18 @@ def _env_overrides(env: dict[str, str]) -> dict[str, Any]:
         set_section(
             "opencode", "request_timeout_seconds", int(env["HDSC_OPENCODE_TIMEOUT_SECONDS"])
         )
+    if "HDSC_OPENCODE_JOB_TIMEOUT_SECONDS" in env:
+        set_section(
+            "opencode", "job_timeout_seconds", int(env["HDSC_OPENCODE_JOB_TIMEOUT_SECONDS"])
+        )
+    if "HDSC_OPENCODE_JOB_RETENTION_SECONDS" in env:
+        set_section(
+            "opencode",
+            "job_retention_seconds",
+            int(env["HDSC_OPENCODE_JOB_RETENTION_SECONDS"]),
+        )
+    if "HDSC_OPENCODE_JOB_STORE_PATH" in env:
+        set_section("opencode", "job_store_path", env["HDSC_OPENCODE_JOB_STORE_PATH"])
     if "HDSC_OPENCODE_FIRE_MAX_CONCURRENT" in env:
         set_section(
             "opencode", "fire_max_concurrent", int(env["HDSC_OPENCODE_FIRE_MAX_CONCURRENT"])

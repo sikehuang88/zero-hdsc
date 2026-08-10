@@ -89,7 +89,12 @@ class EngramPathStep(BaseModel):
 
 
 class EngramActivation(BaseModel):
-    """Query-time mass with the typed path that supports it."""
+    """Query-time mass with its best contributing typed transport path.
+
+    ``hops`` is the length of that retained transport path, not a shortest-path
+    distance. A node can therefore report a longer path when it received more
+    mass through that path than through a shorter alternative.
+    """
 
     node_id: str = Field(min_length=1, max_length=240)
     mass: float = Field(ge=0.0)

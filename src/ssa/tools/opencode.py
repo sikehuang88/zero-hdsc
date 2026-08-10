@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ class OpencodeJob:
     session_id: str
     project_id: str
     model: str
+    conversation_id: str = ""
 
 
 @dataclass
@@ -44,6 +46,10 @@ class _JobState:
     summary: str = "opencode job is running"
     exit_code: int | None = None
     message_id: str | None = None
+    conversation_id: str = ""
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    capacity_acquired: bool = False
     task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
@@ -150,6 +156,8 @@ class OpencodeExecutor:
                 "job_id": arguments.job_id,
                 "session_id": status.get("session_id"),
                 "project_id": status.get("project_id"),
+                "conversation_id": status.get("conversation_id"),
+                "message_id": status.get("message_id"),
                 "state": status.get("state"),
                 "provider": "opencode",
             },
@@ -176,6 +184,8 @@ class OpencodeExecutor:
                 "job_id": arguments.job_id,
                 "session_id": status.get("session_id"),
                 "project_id": status.get("project_id"),
+                "conversation_id": status.get("conversation_id"),
+                "message_id": status.get("message_id"),
                 "state": status.get("state"),
                 "provider": "opencode",
                 "export": True,
@@ -184,7 +194,7 @@ class OpencodeExecutor:
 
 
 class _OpencodeHttpClient:
-    """Small stdlib HTTP adapter with an in-memory fire/check job table."""
+    """Small stdlib HTTP adapter with bounded, restart-aware job tracking."""
 
     def __init__(self, config: OpencodeConfig, password: str, username: str) -> None:
         self._config = config
@@ -193,7 +203,9 @@ class _OpencodeHttpClient:
         self._authorization = "Basic " + base64.b64encode(credentials).decode("ascii")
         self._jobs: dict[str, _JobState] = {}
         self._jobs_lock = asyncio.Lock()
+        self._persist_lock = asyncio.Lock()
         self._capacity = asyncio.Semaphore(config.fire_max_concurrent)
+        self._load_jobs()
 
     async def create_session_and_prompt(
         self,
@@ -204,27 +216,39 @@ class _OpencodeHttpClient:
         conversation_id: str,
     ) -> OpencodeJob:
         directory = str(Path(project_dir).expanduser().resolve())
-        project_id = await self._resolve_project_id(directory)
-        session_payload = await self._request(
-            "POST",
-            f"/project/{quote(project_id, safe='')}/session",
-            {"directory": directory},
-        )
-        session_id = _string_id(session_payload, "session id")
-        job = OpencodeJob(
-            job_id=f"opencode:{uuid.uuid4().hex}",
-            session_id=session_id,
-            project_id=project_id,
-            model=model,
-        )
-        state = _JobState(job=job)
-        async with self._jobs_lock:
-            self._jobs[job.job_id] = state
-        state.task = asyncio.create_task(
-            self._run_job(state, task=task, model=model, conversation_id=conversation_id),
-            name=f"opencode:{job.job_id}",
-        )
-        return job
+        await self._cleanup_jobs()
+        await self._capacity.acquire()
+        try:
+            project_id = await self._resolve_project_id(directory)
+            session_payload = await self._request(
+                "POST",
+                f"/project/{quote(project_id, safe='')}/session",
+                {"directory": directory},
+            )
+            session_id = _string_id(session_payload, "session id")
+            job = OpencodeJob(
+                job_id=f"opencode:{uuid.uuid4().hex}",
+                session_id=session_id,
+                project_id=project_id,
+                model=model,
+                conversation_id=conversation_id,
+            )
+            state = _JobState(
+                job=job,
+                conversation_id=conversation_id,
+                capacity_acquired=True,
+            )
+            async with self._jobs_lock:
+                self._jobs[job.job_id] = state
+            await self._persist_jobs()
+            state.task = asyncio.create_task(
+                self._run_job(state, task=task, model=model),
+                name=f"opencode:{job.job_id}",
+            )
+            return job
+        except BaseException:
+            self._capacity.release()
+            raise
 
     async def poll(self, job_id: str, *, max_chars: int) -> dict[str, Any]:
         state = await self._get_job(job_id)
@@ -245,32 +269,48 @@ class _OpencodeHttpClient:
         *,
         task: str,
         model: str,
-        conversation_id: str,
     ) -> None:
-        del conversation_id
-        async with self._capacity:
-            try:
-                response = await self._request(
-                    "POST",
-                    f"/project/{quote(state.job.project_id, safe='')}/session/"
-                    f"{quote(state.job.session_id, safe='')}/message",
-                    {
-                        "model": _model_payload(model),
-                        "parts": [{"type": "text", "text": task}],
-                    },
+        try:
+            response = await self._request(
+                "POST",
+                self._message_path(state) + "/prompt_async",
+                {
+                    "model": _model_payload(model),
+                    "parts": [{"type": "text", "text": task}],
+                },
+            )
+            state.message_id = _optional_id(response)
+            state.summary = "opencode task submitted; waiting for assistant output"
+            state.updated_at = time.time()
+            await self._persist_jobs()
+            deadline = time.monotonic() + self._config.job_timeout_seconds
+            while state.state == "running":
+                await self._refresh_messages(
+                    state,
+                    max_chars=self._config.poll_max_output_chars,
                 )
-                state.message_id = _optional_id(response)
-                state.state = "done"
-                state.exit_code = 0
-                state.summary = _message_text(response) or "opencode completed without text output"
-            except asyncio.CancelledError:
-                state.state = "aborted"
-                state.summary = "opencode job was cancelled"
-                raise
-            except OpencodeError as exc:
-                state.state = "error"
-                state.exit_code = 1
-                state.summary = str(exc)
+                if state.state != "running":
+                    break
+                if time.monotonic() >= deadline:
+                    raise OpencodeError(
+                        f"opencode job exceeded {self._config.job_timeout_seconds}s runtime budget"
+                    )
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            state.state = "aborted"
+            state.exit_code = 1
+            state.summary = "opencode job was cancelled"
+            raise
+        except OpencodeError as exc:
+            state.state = "error"
+            state.exit_code = 1
+            state.summary = str(exc)
+        finally:
+            state.updated_at = time.time()
+            if state.capacity_acquired:
+                state.capacity_acquired = False
+                self._capacity.release()
+            await self._persist_jobs()
 
     async def _refresh_messages(self, state: _JobState, *, max_chars: int) -> None:
         try:
@@ -286,6 +326,16 @@ class _OpencodeHttpClient:
         text = _message_text(payload)
         if text:
             state.summary = text[-max_chars:]
+        assistant_text, assistant_id, assistant_complete = _assistant_message(payload)
+        if assistant_id is not None:
+            state.message_id = assistant_id
+        if assistant_text:
+            state.summary = assistant_text[-max_chars:]
+        if state.state == "running" and assistant_complete:
+            state.state = "done"
+            state.exit_code = 0
+        state.updated_at = time.time()
+        await self._persist_jobs()
 
     async def _resolve_project_id(self, directory: str) -> str:
         try:
@@ -311,6 +361,7 @@ class _OpencodeHttpClient:
         return _string_id(initialized, "project id")
 
     async def _get_job(self, job_id: str) -> _JobState:
+        await self._cleanup_jobs()
         async with self._jobs_lock:
             state = self._jobs.get(job_id)
         if state is None:
@@ -322,10 +373,115 @@ class _OpencodeHttpClient:
             "job_id": state.job.job_id,
             "session_id": state.job.session_id,
             "project_id": state.job.project_id,
+            "conversation_id": state.conversation_id,
+            "message_id": state.message_id,
             "state": state.state,
             "summary": state.summary[-max_chars:],
             "exit_code": state.exit_code,
         }
+
+    def _message_path(self, state: _JobState) -> str:
+        return (
+            f"/project/{quote(state.job.project_id, safe='')}/session/"
+            f"{quote(state.job.session_id, safe='')}/message"
+        )
+
+    def _load_jobs(self) -> None:
+        path = _job_store_path(self._config.job_store_path)
+        if path is None or not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            records = payload.get("jobs", []) if isinstance(payload, Mapping) else []
+        except (OSError, ValueError, TypeError):
+            return
+        now = time.time()
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            job_id = str(record.get("job_id", "")).strip()
+            session_id = str(record.get("session_id", "")).strip()
+            project_id = str(record.get("project_id", "")).strip()
+            if not job_id or not session_id or not project_id:
+                continue
+            state_name = str(record.get("state", "error"))
+            if state_name == "running":
+                state_name = "aborted"
+            if state_name not in {"done", "error", "aborted"}:
+                state_name = "error"
+            try:
+                updated_at = float(record.get("updated_at", now))
+                created_at = float(record.get("created_at", now))
+            except (TypeError, ValueError):
+                updated_at = now
+                created_at = now
+            if state_name in {"done", "error", "aborted"} and (
+                now - updated_at > self._config.job_retention_seconds
+            ):
+                continue
+            job = OpencodeJob(
+                job_id=job_id,
+                session_id=session_id,
+                project_id=project_id,
+                model=str(record.get("model", "")),
+                conversation_id=str(record.get("conversation_id", "")),
+            )
+            self._jobs[job_id] = _JobState(
+                job=job,
+                state=state_name,
+                summary=(
+                    "opencode job was interrupted by client restart"
+                    if str(record.get("state", "")) == "running"
+                    else str(record.get("summary", "opencode job restored"))
+                ),
+                exit_code=(
+                    int(record["exit_code"])
+                    if record.get("exit_code") is not None
+                    else (1 if state_name == "aborted" else None)
+                ),
+                message_id=(str(record["message_id"]) if record.get("message_id") else None),
+                conversation_id=str(record.get("conversation_id", "")),
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+
+    async def _cleanup_jobs(self) -> None:
+        now = time.time()
+        async with self._jobs_lock:
+            stale = [
+                job_id
+                for job_id, state in self._jobs.items()
+                if state.state in {"done", "error", "aborted"}
+                and now - state.updated_at > self._config.job_retention_seconds
+            ]
+            for job_id in stale:
+                self._jobs.pop(job_id, None)
+        if stale:
+            await self._persist_jobs()
+
+    async def _persist_jobs(self) -> None:
+        path = _job_store_path(self._config.job_store_path)
+        if path is None:
+            return
+        async with self._persist_lock:
+            async with self._jobs_lock:
+                records = [
+                    {
+                        "job_id": state.job.job_id,
+                        "session_id": state.job.session_id,
+                        "project_id": state.job.project_id,
+                        "model": state.job.model,
+                        "conversation_id": state.conversation_id,
+                        "state": state.state,
+                        "summary": state.summary,
+                        "exit_code": state.exit_code,
+                        "message_id": state.message_id,
+                        "created_at": state.created_at,
+                        "updated_at": state.updated_at,
+                    }
+                    for state in self._jobs.values()
+                ]
+            await asyncio.to_thread(_write_job_store, path, records)
 
     async def _request(
         self,
@@ -407,6 +563,55 @@ def _message_text(payload: Any) -> str:
                     values.append(value.strip())
                     break
     return "\n".join(values)
+
+
+def _assistant_message(payload: Any) -> tuple[str, str | None, bool]:
+    """Return the latest assistant text, id, and completion signal."""
+    messages = payload if isinstance(payload, list) else [payload]
+    latest_text = ""
+    latest_id: str | None = None
+    complete = False
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        info = message.get("info")
+        info_map = info if isinstance(info, Mapping) else {}
+        role = str(message.get("role") or info_map.get("role") or "").lower()
+        if role != "assistant":
+            continue
+        text = _message_text(message)
+        if text:
+            latest_text = text
+        latest_id = _optional_id(message) or latest_id
+        timing = info_map.get("time")
+        status = str(message.get("status") or info_map.get("status") or "").lower()
+        complete = complete or bool(
+            text
+            or info_map.get("finish")
+            or info_map.get("finishReason")
+            or (isinstance(timing, Mapping) and timing.get("completed"))
+            or status in {"done", "completed", "success"}
+        )
+    return latest_text, latest_id, complete
+
+
+def _job_store_path(value: str) -> Path | None:
+    normalized = value.strip()
+    return Path(normalized).expanduser() if normalized else None
+
+
+def _write_job_store(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"version": 1, "jobs": records}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise OpencodeError(f"could not persist opencode job store: {exc}") from exc
 
 
 __all__ = ["OpencodeError", "OpencodeExecutor", "OpencodeJob"]

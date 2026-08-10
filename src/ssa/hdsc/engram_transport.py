@@ -98,6 +98,7 @@ def propagate_engram(
             current_paths,
             transitions,
             transition_edges,
+            gates,
         )
         if effective.mode == "bounded_active":
             next_mass, next_paths, dropped = _retain_active(
@@ -172,10 +173,13 @@ def _advance(
     paths: dict[str, tuple[EngramPathStep, ...]],
     transitions: dict[str, list[tuple[str, float]]],
     edges: list[EngramEdge],
+    gates: dict[EngramRelation, float],
 ) -> tuple[dict[str, float], dict[str, tuple[EngramPathStep, ...]]]:
-    edge_lookup: dict[tuple[str, str], list[EngramEdge]] = defaultdict(list)
+    edge_lookup: dict[tuple[str, str], list[tuple[EngramEdge, float]]] = defaultdict(list)
     for edge in edges:
-        edge_lookup[(edge.src, edge.dst)].append(edge)
+        edge_lookup[(edge.src, edge.dst)].append(
+            (edge, edge.transport_weight(gates.get(edge.rel_type, 1.0)))
+        )
     next_mass: dict[str, float] = defaultdict(float)
     next_paths: dict[str, tuple[EngramPathStep, ...]] = {}
     best_path_mass: dict[str, float] = {}
@@ -187,7 +191,7 @@ def _advance(
                 candidate_path = paths.get(source, ())
             else:
                 candidate_edges = edge_lookup[(source, target)]
-                edge = max(candidate_edges, key=lambda item: item.support)
+                edge, _weight = max(candidate_edges, key=lambda item: item[1])
                 candidate_path = (
                     *paths.get(source, ()),
                     EngramPathStep(

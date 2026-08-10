@@ -5,7 +5,10 @@
 ## 已完成
 
 - `OpencodeConfig` 默认关闭，支持 `HDSC_OPENCODE_*` 环境覆盖。
-- `opencode_fire` 异步创建 session/job，`opencode_check` 轮询，`opencode_export` 导出有界摘要。
+- `opencode_fire` 在并发许可内创建 session，并用 `prompt_async` 投递后立即返回 job；后台按 GET `/message` 轮询，`opencode_check` 读取状态，`opencode_export` 导出有界摘要。
+- `request_timeout_seconds` 只约束单次 HTTP 请求；job 总时长由 `job_timeout_seconds` 独立约束，不再把长任务截断在一次 POST 内。
+- job 元数据持久化到 `job_store_path`；进程重启时运行中 job 明确标为 `aborted`，终态记录按 `job_retention_seconds` 回收。
+- job/status 保留 `conversation_id` 与 assistant `message_id`，供后续 session-to-trace 回写绑定使用。
 - 只有 `enabled=true` 且存在 `OPENCODE_SERVER_PASSWORD` 时才注册能力。
 - HTTP 请求使用 Basic Auth，输出受 `poll_max_output_chars` 和 ToolKernel 双重截断。
 - Tool audit 只保存参数/输出哈希、job/session/state/provider 等元数据，不保存原始 diff。

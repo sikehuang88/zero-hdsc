@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 
 from ssa.clock import Clock
 from ssa.config import EngramConfig
-from ssa.domain.engram import EngramQueryResult, EngramRelation
+from ssa.domain.engram import EngramQueryResult, EngramRelation, EngramTransportAudit
 from ssa.hdsc.engram_transport import EngramTransportConfig, propagate_engram
 from ssa.storage.engram_repository import EngramRepository
 from ssa.storage.trace_repository import SqliteTraceRepository
@@ -64,7 +64,33 @@ class EngramActivationService:
         sync: bool = True,
     ) -> EngramQueryResult:
         traces = self._traces.recent(conversation_id, limit=self._graph_limit)
+        trace_by_id = {trace.id: trace for trace in traces}
+        for seed_id in seed_masses:
+            if seed_id in trace_by_id:
+                continue
+            seed_trace = self._traces.get(seed_id)
+            if seed_trace is not None and seed_trace.conversation_id == conversation_id:
+                trace_by_id[seed_trace.id] = seed_trace
+        valid_seed_masses = {
+            node_id: mass for node_id, mass in seed_masses.items() if node_id in trace_by_id
+        }
+        traces = sorted(trace_by_id.values(), key=lambda trace: (trace.created_at_ms, trace.id))
         node_ids = [trace.id for trace in traces]
+        if not valid_seed_masses:
+            return EngramQueryResult(
+                activations=[],
+                audit=EngramTransportAudit(
+                    mode=self._transport.mode,
+                    node_count=len(node_ids),
+                    edge_count=0,
+                    seed_mass=0.0,
+                    propagated_mass=0.0,
+                    null_mass=0.0,
+                    conservation_residual=0.0,
+                    max_hops=self._transport.max_hops,
+                    path_grounded_count=0,
+                ),
+            )
         if sync:
             links = self._traces.links_among(node_ids)
             self._engram.sync_trace_subgraph(traces, links)
@@ -76,7 +102,7 @@ class EngramActivationService:
         return propagate_engram(
             node_ids,
             edges,
-            dict(seed_masses),
+            valid_seed_masses,
             relation_gates=dict(relation_gates or {}),
             config=self._transport,
         )

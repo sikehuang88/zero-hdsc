@@ -14,7 +14,7 @@ from ssa.config import Environment, OpencodeConfig, ToolConfig, load_settings
 from ssa.interfaces.opencode_broker import opencode_broker_router
 from ssa.tools.executors import build_default_tool_kernel
 from ssa.tools.models import ToolAutonomyContext
-from ssa.tools.opencode import OpencodeExecutor, OpencodeJob
+from ssa.tools.opencode import OpencodeExecutor, OpencodeJob, _OpencodeHttpClient
 from ssa.tools.registry import ToolRegistry
 
 
@@ -134,6 +134,61 @@ def test_opencode_settings_and_secret_are_environment_only() -> None:
     assert settings.secrets.opencode_server_username == "zero"
     assert settings.secrets.broker_token.get_secret_value() == "broker-secret"
     assert "local-secret" not in json.dumps(settings.model_dump(mode="json"))
+
+
+@pytest.mark.asyncio
+async def test_http_client_submits_async_prompt_and_polls_assistant_output(tmp_path: Path) -> None:
+    client = _OpencodeHttpClient(
+        OpencodeConfig(
+            job_store_path=str(tmp_path / "jobs.json"),
+            job_timeout_seconds=60,
+        ),
+        "secret",
+        "opencode",
+    )
+    calls: list[tuple[str, str]] = []
+
+    async def resolve(_directory: str) -> str:
+        return "project-1"
+
+    async def request(method: str, path: str, payload: object = None) -> object:
+        del payload
+        calls.append((method, path))
+        if method == "POST" and path.endswith("/session"):
+            return {"id": "session-1"}
+        if method == "POST" and path.endswith("/prompt_async"):
+            return {}
+        if method == "GET" and path.endswith("/message"):
+            return [
+                {
+                    "info": {
+                        "id": "message-1",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                    },
+                    "parts": [{"type": "text", "text": "async result"}],
+                }
+            ]
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    client._resolve_project_id = resolve  # type: ignore[method-assign]
+    client._request = request  # type: ignore[method-assign]
+    job = await client.create_session_and_prompt(
+        task="run focused tests",
+        project_dir=str(tmp_path),
+        model="provider/model",
+        conversation_id="conversation-1",
+    )
+    state = await client._get_job(job.job_id)
+    assert state.task is not None
+    await state.task
+
+    status = await client.poll(job.job_id, max_chars=100)
+    assert status["state"] == "done"
+    assert status["summary"] == "async result"
+    assert status["conversation_id"] == "conversation-1"
+    assert any(method == "POST" and path.endswith("/prompt_async") for method, path in calls)
+    assert not any(method == "POST" and path.endswith("/message") for method, path in calls)
 
 
 @pytest.mark.asyncio
