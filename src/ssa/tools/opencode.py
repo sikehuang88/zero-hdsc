@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -217,8 +218,17 @@ class _OpencodeHttpClient:
     ) -> OpencodeJob:
         directory = str(Path(project_dir).expanduser().resolve())
         await self._cleanup_jobs()
-        await self._capacity.acquire()
+        acquired = False
+        state: _JobState | None = None
         try:
+            try:
+                await asyncio.wait_for(
+                    self._capacity.acquire(),
+                    timeout=self._config.capacity_wait_seconds,
+                )
+            except TimeoutError as exc:
+                raise OpencodeError("opencode capacity exhausted; retry later") from exc
+            acquired = True
             project_id = await self._resolve_project_id(directory)
             session_payload = await self._request(
                 "POST",
@@ -247,7 +257,13 @@ class _OpencodeHttpClient:
             )
             return job
         except BaseException:
-            self._capacity.release()
+            if state is not None:
+                async with self._jobs_lock:
+                    self._jobs.pop(state.job.job_id, None)
+                with suppress(OpencodeError):
+                    await self._persist_jobs()
+            if acquired:
+                self._capacity.release()
             raise
 
     async def poll(self, job_id: str, *, max_chars: int) -> dict[str, Any]:
@@ -305,6 +321,10 @@ class _OpencodeHttpClient:
             state.state = "error"
             state.exit_code = 1
             state.summary = str(exc)
+        except Exception as exc:
+            state.state = "error"
+            state.exit_code = 1
+            state.summary = f"opencode job failed: {type(exc).__name__}: {exc}"
         finally:
             state.updated_at = time.time()
             if state.capacity_acquired:
@@ -323,6 +343,7 @@ class _OpencodeHttpClient:
             if state.state == "running":
                 return
             raise
+        previous = (state.state, state.message_id, state.exit_code)
         text = _message_text(payload)
         if text:
             state.summary = text[-max_chars:]
@@ -334,8 +355,10 @@ class _OpencodeHttpClient:
         if state.state == "running" and assistant_complete:
             state.state = "done"
             state.exit_code = 0
-        state.updated_at = time.time()
-        await self._persist_jobs()
+        current = (state.state, state.message_id, state.exit_code)
+        if current != previous:
+            state.updated_at = time.time()
+            await self._persist_jobs()
 
     async def _resolve_project_id(self, directory: str) -> str:
         try:
@@ -448,6 +471,18 @@ class _OpencodeHttpClient:
     async def _cleanup_jobs(self) -> None:
         now = time.time()
         async with self._jobs_lock:
+            orphaned = []
+            for state in self._jobs.values():
+                if (
+                    state.state == "running"
+                    and state.task is None
+                    and now - state.updated_at > 1.0
+                ):
+                    state.state = "error"
+                    state.exit_code = 1
+                    state.summary = "opencode job has no active worker task"
+                    state.updated_at = now
+                    orphaned.append(state.job.job_id)
             stale = [
                 job_id
                 for job_id, state in self._jobs.items()
@@ -456,7 +491,7 @@ class _OpencodeHttpClient:
             ]
             for job_id in stale:
                 self._jobs.pop(job_id, None)
-        if stale:
+        if stale or orphaned:
             await self._persist_jobs()
 
     async def _persist_jobs(self) -> None:
@@ -586,8 +621,7 @@ def _assistant_message(payload: Any) -> tuple[str, str | None, bool]:
         timing = info_map.get("time")
         status = str(message.get("status") or info_map.get("status") or "").lower()
         complete = complete or bool(
-            text
-            or info_map.get("finish")
+            info_map.get("finish")
             or info_map.get("finishReason")
             or (isinstance(timing, Mapping) and timing.get("completed"))
             or status in {"done", "completed", "success"}

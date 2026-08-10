@@ -204,6 +204,7 @@ request_timeout_seconds = 120
 job_timeout_seconds = 3600
 job_retention_seconds = 86400
 job_store_path = "data/opencode_jobs.json"
+capacity_wait_seconds = 0.25
 fire_max_concurrent = 2
 poll_max_output_chars = 24000
 default_model = "hdsc/deepseek-v4-flash"

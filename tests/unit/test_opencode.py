@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,13 @@ from ssa.config import Environment, OpencodeConfig, ToolConfig, load_settings
 from ssa.interfaces.opencode_broker import opencode_broker_router
 from ssa.tools.executors import build_default_tool_kernel
 from ssa.tools.models import ToolAutonomyContext
-from ssa.tools.opencode import OpencodeExecutor, OpencodeJob, _OpencodeHttpClient
+from ssa.tools.opencode import (
+    OpencodeError,
+    OpencodeExecutor,
+    OpencodeJob,
+    _JobState,
+    _OpencodeHttpClient,
+)
 from ssa.tools.registry import ToolRegistry
 
 
@@ -189,6 +196,91 @@ async def test_http_client_submits_async_prompt_and_polls_assistant_output(tmp_p
     assert status["conversation_id"] == "conversation-1"
     assert any(method == "POST" and path.endswith("/prompt_async") for method, path in calls)
     assert not any(method == "POST" and path.endswith("/message") for method, path in calls)
+
+
+@pytest.mark.asyncio
+async def test_partial_assistant_text_does_not_complete_job() -> None:
+    client = _OpencodeHttpClient(
+        OpencodeConfig(job_store_path=""),
+        "secret",
+        "opencode",
+    )
+    state = _JobState(
+        job=OpencodeJob(
+            job_id="opencode:partial",
+            session_id="session-1",
+            project_id="project-1",
+            model="provider/model",
+        )
+    )
+
+    async def request(_method: str, _path: str, _payload: object = None) -> object:
+        return [
+            {
+                "info": {"id": "message-1", "role": "assistant", "time": {}},
+                "parts": [{"type": "text", "text": "partial output"}],
+            }
+        ]
+
+    client._request = request  # type: ignore[method-assign]
+    await client._refresh_messages(state, max_chars=100)
+
+    assert state.state == "running"
+    assert state.summary == "partial output"
+
+
+@pytest.mark.asyncio
+async def test_capacity_exhaustion_fails_fast() -> None:
+    client = _OpencodeHttpClient(
+        OpencodeConfig(
+            job_store_path="",
+            capacity_wait_seconds=0.05,
+            fire_max_concurrent=1,
+        ),
+        "secret",
+        "opencode",
+    )
+    await client._capacity.acquire()
+    try:
+        with pytest.raises(OpencodeError, match="capacity exhausted"):
+            await client.create_session_and_prompt(
+                task="queued task",
+                project_dir="E:/workspace",
+                model="provider/model",
+                conversation_id="conversation-1",
+            )
+    finally:
+        client._capacity.release()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_worker_error_is_recorded_and_releases_capacity() -> None:
+    client = _OpencodeHttpClient(
+        OpencodeConfig(job_store_path="", fire_max_concurrent=1),
+        "secret",
+        "opencode",
+    )
+    await client._capacity.acquire()
+    state = _JobState(
+        job=OpencodeJob(
+            job_id="opencode:boom",
+            session_id="session-1",
+            project_id="project-1",
+            model="provider/model",
+        ),
+        capacity_acquired=True,
+    )
+
+    async def request(_method: str, _path: str, _payload: object = None) -> object:
+        raise RuntimeError("unexpected worker failure")
+
+    client._request = request  # type: ignore[method-assign]
+    await client._run_job(state, task="boom", model="provider/model")
+
+    assert state.state == "error"
+    assert "unexpected worker failure" in state.summary
+    await asyncio.wait_for(client._capacity.acquire(), timeout=0.1)
+    client._capacity.release()
 
 
 @pytest.mark.asyncio

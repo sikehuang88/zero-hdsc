@@ -8,6 +8,8 @@
 - `opencode_fire` 在并发许可内创建 session，并用 `prompt_async` 投递后立即返回 job；后台按 GET `/message` 轮询，`opencode_check` 读取状态，`opencode_export` 导出有界摘要。
 - `request_timeout_seconds` 只约束单次 HTTP 请求；job 总时长由 `job_timeout_seconds` 独立约束，不再把长任务截断在一次 POST 内。
 - job 元数据持久化到 `job_store_path`；进程重启时运行中 job 明确标为 `aborted`，终态记录按 `job_retention_seconds` 回收。
+- `fire_max_concurrent` 使用 `capacity_wait_seconds` 有限等待；容量满时快速返回可重试错误，不阻塞外层对话。
+- 轮询中的增量文本只更新内存摘要；job store 只在投递、消息/状态变化和终态跃迁时写入。
 - job/status 保留 `conversation_id` 与 assistant `message_id`，供后续 session-to-trace 回写绑定使用。
 - 只有 `enabled=true` 且存在 `OPENCODE_SERVER_PASSWORD` 时才注册能力。
 - HTTP 请求使用 Basic Auth，输出受 `poll_max_output_chars` 和 ToolKernel 双重截断。
